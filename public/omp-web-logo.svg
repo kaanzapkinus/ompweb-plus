@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#161616" />
+  <rect x="32" y="32" width="448" height="448" rx="32" fill="#1c1c1c" />
+  <g id="mark" fill="#d2d2ce">
+    <path fill-rule="evenodd" d="M80 112H432V352H272L160 432V352H80ZM112 144V320H192V370L262 320H400V144Z" />
+    <path d="M160 176L216 224L160 272L144 252L178 224L144 196Z" />
+    <path d="M248 248H336V272H248Z" />
+  </g>
+  <g id="texture" fill="#70706c">
+    <rect x="316" y="328" width="4" height="4" />
+    <rect x="332" y="328" width="4" height="4" />
+    <rect x="348" y="328" width="4" height="4" />
+    <rect x="364" y="328" width="4" height="4" />
+    <rect x="380" y="328" width="6" height="6" />
+    <rect x="396" y="328" width="6" height="6" />
+    <rect x="324" y="340" width="4" height="4" />
+    <rect x="340" y="340" width="4" height="4" />
+    <rect x="356" y="340" width="4" height="4" />
+    <rect x="372" y="340" width="6" height="6" />
+    <rect x="388" y="340" width="6" height="6" />
+    <rect x="404" y="340" width="6" height="6" />
+  </g>
+</svg>

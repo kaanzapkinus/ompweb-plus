@@ -1,0 +1,188 @@
+#!/usr/bin/env node
+"use strict";
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+require("./node-version").exitIfUnsupportedNode();
+
+// Install ompweb as a macOS launchd user agent (starts at login, restarts on crash).
+//
+// Usage from the built source checkout:
+//   node bin/omp-web-launchd.js [install|uninstall|status]
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { spawnSync } = require("node:child_process");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const fs = require("node:fs");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const os = require("node:os");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const path = require("node:path");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { resolvePasswordHash } = require("./omp-web-hash-password");
+
+const LABEL = "com.kaanzapkinus.ompweb-plus";
+const HOME = os.homedir();
+const PLIST = path.join(HOME, "Library", "LaunchAgents", `${LABEL}.plist`);
+const LOG_DIR = path.join(HOME, "Library", "Logs", "ompweb");
+const DOMAIN = `gui/${process.getuid?.() ?? 0}`;
+
+function fail(message) {
+  console.error(`error: ${message}`);
+  process.exit(1);
+}
+
+function isExecutableFile(candidate) {
+  try {
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return fs.statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function which(name) {
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (dir && isExecutableFile(path.join(dir, name))) return path.join(dir, name);
+  }
+  return null;
+}
+
+function xmlEscape(value) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function launchctl(args, { ignoreFailure = false } = {}) {
+  const result = spawnSync("launchctl", args, { encoding: "utf8" });
+  if (result.error) fail(`launchctl not runnable: ${result.error.message}`);
+  if (result.status !== 0 && !ignoreFailure) {
+    fail(`launchctl ${args.join(" ")} failed: ${(result.stderr ?? "").trim()}`);
+  }
+  return result.stdout ?? "";
+}
+
+function install() {
+  if (process.argv[3] || process.env.OMP_WEB_PKG) {
+    fail("Source services run this checkout; package-spec and OMP_WEB_PKG are not supported");
+  }
+  const nodeBin = process.execPath;
+  const webLauncher = path.join(__dirname, "omp-web.js");
+
+  const ompBin = process.env.OMP_WEB_OMP_BIN ?? which("omp");
+  if (process.env.OMP_WEB_OMP_BIN) {
+    try {
+      fs.accessSync(process.env.OMP_WEB_OMP_BIN, fs.constants.X_OK);
+    } catch {
+      fail(`OMP_WEB_OMP_BIN=${process.env.OMP_WEB_OMP_BIN} is not executable`);
+    }
+  } else if (!ompBin) {
+    console.warn("warning: omp binary not found; live-agent features will be unavailable (set OMP_WEB_OMP_BIN)");
+  }
+
+  const port = process.env.PORT ?? "30177";
+  const hostname = process.env.OMP_WEB_HOSTNAME ?? "127.0.0.1";
+  const noOpen = process.env.OMP_WEB_NO_OPEN ?? "1";
+  const disableAutoUpdate = process.env.OMP_WEB_DISABLE_AUTOUPDATE;
+  const installName = process.env.OMP_WEB_NAME;
+  // Only a hash is stored in the plist: omp-web never forwards a plaintext
+  // password, and `OMP_WEB_PASSWORD` set for this install is hashed here.
+  let passwordHash;
+  try {
+    passwordHash = resolvePasswordHash();
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  const trustedHeaderDigest = process.env.OMP_WEB_TRUSTED_HEADER_SHA256;
+  const agentDir = process.env.PI_CODING_AGENT_DIR?.replace(/^~(?=\/|$)/, HOME);
+
+  const asdfBin = which("asdf");
+  const svcPath = [
+    ...(ompBin ? [path.dirname(ompBin)] : []),
+    ...(asdfBin ? [path.dirname(asdfBin)] : []),
+    path.dirname(nodeBin),
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ].filter((dir, i, all) => all.indexOf(dir) === i).join(path.delimiter);
+
+  const env = {
+    PATH: svcPath,
+    PORT: port,
+    OMP_WEB_HOSTNAME: hostname,
+    OMP_WEB_NO_OPEN: noOpen,
+    ...(disableAutoUpdate ? { OMP_WEB_DISABLE_AUTOUPDATE: disableAutoUpdate } : {}),
+    ...(installName ? { OMP_WEB_NAME: installName } : {}),
+    ...(passwordHash ? { OMP_WEB_PASSWORD_HASH: passwordHash } : {}),
+    ...(trustedHeaderDigest ? { OMP_WEB_TRUSTED_HEADER_SHA256: trustedHeaderDigest } : {}),
+    ...(ompBin ? { OMP_WEB_OMP_BIN: ompBin } : {}),
+    ...(agentDir ? { PI_CODING_AGENT_DIR: agentDir } : {}),
+  };
+  const envXml = Object.entries(env)
+    .map(([key, value]) => `    <key>${xmlEscape(key)}</key><string>${xmlEscape(value)}</string>`)
+    .join("\n");
+
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${xmlEscape(nodeBin)}</string>
+    <string>${xmlEscape(webLauncher)}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+${envXml}
+  </dict>
+  <key>WorkingDirectory</key><string>${xmlEscape(HOME)}</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${xmlEscape(path.join(LOG_DIR, "ompweb.log"))}</string>
+  <key>StandardErrorPath</key><string>${xmlEscape(path.join(LOG_DIR, "ompweb.err.log"))}</string>
+</dict>
+</plist>
+`;
+
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+  fs.mkdirSync(path.dirname(PLIST), { recursive: true });
+  fs.writeFileSync(PLIST, plist, { mode: 0o600 });
+  fs.chmodSync(PLIST, 0o600);
+
+  launchctl(["bootout", `${DOMAIN}/${LABEL}`], { ignoreFailure: true });
+  launchctl(["bootstrap", DOMAIN, PLIST]);
+
+  console.log(`installed: ${PLIST}`);
+  console.log(`source:    ${path.dirname(__dirname)} (via ${nodeBin})`);
+  console.log(`url:       http://${hostname}:${port}`);
+  console.log(`logs:      ${path.join(LOG_DIR, "ompweb.log")}`);
+  if (passwordHash) console.log("note:      the password hash is stored in the plist (mode 600)");
+}
+
+function uninstall() {
+  launchctl(["bootout", `${DOMAIN}/${LABEL}`], { ignoreFailure: true });
+  fs.rmSync(PLIST, { force: true });
+  console.log(`uninstalled: ${LABEL}`);
+}
+
+function status() {
+  const result = spawnSync("launchctl", ["print", `${DOMAIN}/${LABEL}`], { encoding: "utf8" });
+  if (result.status === 0) {
+    const lines = (result.stdout ?? "").split("\n").filter((line) => /\b(state|pid|last exit)\b/.test(line));
+    console.log(lines.join("\n") || (result.stdout ?? "").trim());
+    return;
+  }
+  console.log(`not loaded: ${LABEL}`);
+  process.exit(1);
+}
+
+if (process.platform !== "darwin") fail("launchd services are macOS-only");
+
+const command = process.argv[2] ?? "install";
+if (command === "install") install();
+else if (command === "uninstall") uninstall();
+else if (command === "status") status();
+else {
+  console.error("usage: node bin/omp-web-launchd.js [install|uninstall|status]");
+  process.exit(2);
+}

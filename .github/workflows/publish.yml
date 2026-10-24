@@ -1,0 +1,42 @@
+name: GitHub source release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  source-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+          cache: npm
+      - name: Verify source release identity
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          node -e 'const p = require("./package.json"); if (!p.private || p.name !== "@kaanzapkinus/ompweb-plus" || process.env.TAG !== `v${p.version}`) process.exit(1)'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - name: Publish GitHub source release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          node bin/generate-release-notes.js --tag "$TAG" --output "$RUNNER_TEMP/ompweb-release-notes.md"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/ompweb-release-notes.md" --draft=false
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/ompweb-release-notes.md"
+          fi
