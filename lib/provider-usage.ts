@@ -1,6 +1,6 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { resolveOmpBin } from "./omp/omp-cli";
+import { resolveOmpBin, wrapWindowsScript } from "./omp/omp-cli";
 import { asNumber, isRecord } from "./type-guards";
 import type {
   ProviderUsageReport,
@@ -164,7 +164,8 @@ async function fetchProviderUsage(refresh = false): Promise<string> {
   const bin = resolveOmpBin();
   if (!bin) throw new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.");
   if (refresh) {
-    await execFileAsync(bin, ["usage", "invalidate"], {
+    const invalidate = wrapWindowsScript(bin, ["usage", "invalidate"]);
+    await execFileAsync(invalidate.file, invalidate.args, {
       timeout: USAGE_TIMEOUT_MS,
       maxBuffer: USAGE_MAX_BUFFER,
       windowsHide: true,
@@ -172,7 +173,8 @@ async function fetchProviderUsage(refresh = false): Promise<string> {
   }
   // Unredacted so accounts show their real email; only the parsed label, plan
   // and windows reach the browser, never the raw metadata.
-  const { stdout } = await execFileAsync(bin, ["usage", "--json"], {
+  const usage = wrapWindowsScript(bin, ["usage", "--json"]);
+  const { stdout } = await execFileAsync(usage.file, usage.args, {
     timeout: USAGE_TIMEOUT_MS,
     maxBuffer: USAGE_MAX_BUFFER,
     windowsHide: true,

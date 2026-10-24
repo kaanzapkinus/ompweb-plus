@@ -317,29 +317,40 @@ async function openFileChannel(rawPath: string, sessionId: string | null, handle
   let lastSize = access.stat.size;
   let lastCtimeMs = access.stat.ctimeMs;
   let lastIno = access.stat.ino;
-  const onStat = (stat: fs.Stats) => {
-    if (stat.mtimeMs === lastMtimeMs && stat.size === lastSize
-      && stat.ctimeMs === lastCtimeMs && stat.ino === lastIno) return;
-    lastMtimeMs = stat.mtimeMs;
-    lastSize = stat.size;
-    lastCtimeMs = stat.ctimeMs;
-    lastIno = stat.ino;
+  const onStat = (stat?: fs.Stats) => {
+    const mtimeMs = stat?.mtimeMs ?? 0;
+    const size = stat?.size ?? 0;
+    const ctimeMs = stat?.ctimeMs ?? 0;
+    const ino = stat?.ino ?? 0;
+    if (mtimeMs === lastMtimeMs && size === lastSize
+      && ctimeMs === lastCtimeMs && ino === lastIno) return;
+    lastMtimeMs = mtimeMs;
+    lastSize = size;
+    lastCtimeMs = ctimeMs;
+    lastIno = ino;
     handle.send({
       type: "change",
-      mtime: stat.nlink === 0 ? new Date().toISOString() : stat.mtime.toISOString(),
-      size: stat.size,
+      mtime: stat ? stat.mtime.toISOString() : new Date().toISOString(),
+      size,
     });
   };
-  try {
-    // Watch the path, not its current inode. Native watches can miss writes
-    // and stay attached to a removed inode after an editor's atomic save.
-    // Node shares the stat watcher between subscriptions for the same path.
-    fs.watchFile(filePath, { persistent: false, interval: 500 }, onStat);
-  } catch {
-    handle.send({ type: "error", message: "Failed to watch file" });
-    handle.end();
-    return SUBSCRIBED;
-  }
-  handle.setDetach(() => fs.unwatchFile(filePath, onStat));
+  let reading = false;
+  // Compare every sample with the authorized baseline. watchFile establishes
+  // its own async baseline and can swallow the first write after "connected".
+  const timer = setInterval(() => {
+    if (reading || !handle.active) return;
+    reading = true;
+    fs.stat(filePath, (error, stat) => {
+      reading = false;
+      if (!handle.active) return;
+      if (error && error.code !== "ENOENT" && error.code !== "ENOTDIR") {
+        handle.send({ type: "error", message: "Failed to watch file" });
+        handle.end();
+        return;
+      }
+      onStat(error ? undefined : stat);
+    });
+  }, 500).unref();
+  handle.setDetach(() => clearInterval(timer));
   return SUBSCRIBED;
 }

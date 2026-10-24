@@ -88,6 +88,12 @@ Feature availability follows the separately installed OMP runtime, not this web 
 - Native skills/plugins use the selected workspace and runtime. Managed/plugin-provided entries may be read-only. Installation may require network access and executing third-party tooling; review the source and requested operation first.
 - Quota reports/reset scope, model access, reasoning options, provider pricing, and transcription models depend on your own authenticated OMP installation. No model catalog entry guarantees a free tier, subscription entitlement, or continued endpoint availability.
 
+## Dependency advisories
+
+The publication-time `npm audit --omit=dev` reports 22 production dependency findings: 5 low, 6 moderate, 6 high, and 5 critical. The counts describe affected dependency records, not a verified number of independently exploitable application vulnerabilities, and the registry's advisory data can change.
+
+These inherited dependency findings were not remediated as part of the source/privacy migration. Passing tests, builds, and secret scans do not establish that the application is vulnerability-free. Run `npm audit --omit=dev` against the installed lockfile, review affected execution paths and upstream fixes, and do not treat this repository as security-certified for Internet exposure. Authentication, pairing, and encrypted transport do not repair vulnerable dependencies. Avoid blanket `npm audit fix --force` upgrades without reviewing their compatibility effects.
+
 ## Notifications and installable app
 
 The server must be running for delivery. Web Push additionally requires a secure context, subscription/permission, supported browser/OS, and outbound access to push services. System-only fallback needs an open tab; non-localhost plain HTTP supports only in-app toasts. Desktop push can require the browser process running. iOS/iPadOS 16.4+ requires an installed Home Screen app for push. Presence and user settings suppress delivery in some active-session cases; OS policies can defer notifications.

@@ -41,6 +41,8 @@ Do not substitute `npm run start:lan` for the CLI's authentication-aware startup
 
 The web interface can run commands and access files with the server user's permissions. It is a trusted single-user agent interface, **not a multi-user sandbox**. Loopback without a password is intended only for a trusted local machine. Require authentication and protected transport before allowing remote access.
 
+**Dependency advisory warning:** the publication-time `npm audit --omit=dev` reports 22 production dependency findings, including 5 rated critical. These inherited dependency findings are not resolved by this source migration; passing tests and secret scans are not a vulnerability-free certification. Review [the release limitations](docs/public-release.md#dependency-advisories) before exposing an installation.
+
 Generate a web password hash interactively; the password is read from standard input, not an argument:
 
 ```bash
