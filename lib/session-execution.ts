@@ -2,26 +2,27 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "./omp/paths";
-import type { ExecutionJob, ExecutionMode, ExecutionModel, ExecutionSnapshot } from "./session-execution-types";
+import type { ExecutionJob, ExecutionMode, ExecutionModel, ExecutionPromptOptions, ExecutionSnapshot } from "./session-execution-types";
+import { validateOutgoingPrompt } from "./image-attachments";
+import { isToolPreset } from "./tool-presets";
 
 export class ExecutionError extends Error {
   constructor(message: string, public readonly status = 400) { super(message); }
 }
+export interface ExecutionPromptPayload extends ExecutionModel, ExecutionPromptOptions {
+  prompt: string;
+  runAt: number;
+}
 export interface StoredExecutionJob extends ExecutionJob {
   sessionId: string;
-  requestId?: string;
-  continuation?: boolean;
+  originalRequest?: ExecutionPromptPayload;
   ownerPid?: number;
   ownerToken?: string;
   stage?: "preparing" | "dispatching" | "active";
   notBefore?: number;
 }
-export interface ScheduledChatDraft {
+export interface ScheduledChatDraft extends ExecutionPromptPayload {
   cwd: string;
-  prompt: string;
-  runAt: number;
-  provider: string;
-  modelId: string;
   requestId: string;
 }
 export interface ScheduledChatCreation {
@@ -44,6 +45,7 @@ interface ExecutionReceipt {
   model?: ExecutionModel;
   resumeJobId?: string;
   automaticResumeCancelled?: boolean;
+  controlResult?: { status: "completed" | "cancelled" | "failed" | "uncertain"; error?: string };
 }
 const globals = globalThis as unknown as {
   __ompExecutionToken?: string;
@@ -63,12 +65,16 @@ function load(): Store {
   value.creations ??= {};
   if (value.version !== 1 || !value.policies || typeof value.policies !== "object" || Array.isArray(value.policies) || !Array.isArray(value.jobs)
     || Object.values(value.policies).some(p => !p || (p.mode !== "wait" && p.mode !== "fallback"))
-    || value.jobs.some(j => !j || typeof j.id !== "string" || typeof j.sessionId !== "string" || typeof j.provider !== "string" || typeof j.modelId !== "string" || typeof j.prompt !== "string" || !Number.isFinite(j.createdAt) || (j.runAt !== null && !Number.isFinite(j.runAt)) || !statuses.has(j.status) || (j.kind !== "prompt" && j.kind !== "resume"))) {
+    || value.jobs.some(j => !j || typeof j.id !== "string" || typeof j.sessionId !== "string" || typeof j.provider !== "string" || typeof j.modelId !== "string" || typeof j.prompt !== "string" || !Number.isFinite(j.createdAt) || (j.runAt !== null && !Number.isFinite(j.runAt)) || !statuses.has(j.status) || (j.kind !== "prompt" && j.kind !== "resume")
+      || (j.updatedAt !== undefined && !Number.isFinite(j.updatedAt)) || (j.dismissedAt !== undefined && !Number.isFinite(j.dismissedAt))
+      || (j.btwId !== undefined && (typeof j.btwId !== "string" || !j.btwId))
+      || promptOptionsError(j) || (j.originalRequest && (promptOptionsError(j.originalRequest) || typeof j.originalRequest.prompt !== "string" || !Number.isFinite(j.originalRequest.runAt))))) {
     throw new ExecutionError("Invalid execution metadata; restore or repair web-session-execution.json before making changes", 500);
   }
   if (!value.creations || typeof value.creations !== "object" || Array.isArray(value.creations)
     || Object.entries(value.creations).some(([requestId, creation]) => !creation || !creation.draft || creation.draft.requestId !== requestId
       || typeof creation.draft.cwd !== "string" || typeof creation.draft.prompt !== "string" || typeof creation.draft.provider !== "string" || typeof creation.draft.modelId !== "string" || !Number.isFinite(creation.draft.runAt)
+      || promptOptionsError(creation.draft)
       || !["reserved", "creating", "created"].includes(creation.phase)
       || (creation.phase === "created" && (typeof creation.sessionId !== "string" || !creation.sessionId || typeof creation.sessionFile !== "string" || !creation.sessionFile)))) {
     throw new ExecutionError("Invalid execution metadata; restore or repair web-session-execution.json before making changes", 500);
@@ -157,7 +163,21 @@ function change<T>(run: (store: Store, dirty: () => void) => T): T {
 }
 export function getExecutionSnapshot(sessionId: string): ExecutionSnapshot {
   const store = load();
-  return { policy: { mode: store.policies[sessionId]?.mode ?? "fallback" }, jobs: store.jobs.filter(j => j.sessionId === sessionId).map(({ id, kind, status, runAt, prompt, provider, modelId, createdAt, error }) => ({ id, kind, status, runAt, prompt, provider, modelId, createdAt, ...(error ? { error } : {}) })) };
+  return { policy: { mode: store.policies[sessionId]?.mode ?? "fallback" }, jobs: store.jobs.filter(j => j.sessionId === sessionId).map(({ sessionId: _sessionId, originalRequest: _originalRequest, ownerPid: _ownerPid, ownerToken: _ownerToken, stage: _stage, notBefore: _notBefore, ...job }) => job) };
+}
+
+/** Polling never transfers image bytes; only the explicitly opened editor does. */
+export function getExecutionResponseSnapshot(sessionId: string, imageJobId?: string): ExecutionSnapshot {
+  const snapshot = getExecutionSnapshot(sessionId);
+  if (imageJobId && !snapshot.jobs.some(job => job.id === imageJobId)) throw new ExecutionError("Scheduled job not found", 404);
+  return {
+    ...snapshot,
+    jobs: snapshot.jobs.map(({ images, ...job }) => ({
+      ...job,
+      ...(images?.length ? { imageCount: images.length } : {}),
+      ...(job.id === imageJobId && images !== undefined ? { images } : {}),
+    })),
+  };
 }
 
 /** Recover a new-chat creation whose successful response was lost. */
@@ -171,12 +191,64 @@ export function findExecutionJob(jobId: string): StoredExecutionJob | undefined 
   return job ? { ...job } : undefined;
 }
 
-function sameScheduledPrompt(left: Pick<ExecutionJob, "prompt" | "runAt" | "provider" | "modelId">, right: Pick<ExecutionJob, "prompt" | "runAt" | "provider" | "modelId">): boolean {
-  return left.prompt === right.prompt && left.runAt === right.runAt && left.provider === right.provider && left.modelId === right.modelId;
+function promptOptionsError(body: ExecutionPromptOptions): string | null {
+  if (body.images !== undefined && !Array.isArray(body.images)) return "images must be an array";
+  if (body.thinkingLevel !== undefined && (typeof body.thinkingLevel !== "string" || !body.thinkingLevel.trim() || body.thinkingLevel.length > 128)) return "Invalid thinking level";
+  if (body.toolPreset !== undefined && !isToolPreset(body.toolPreset)) return "Invalid tool preset";
+  for (const key of ["fastMode", "slowMode", "advisorEnabled"] as const) {
+    if (body[key] !== undefined && typeof body[key] !== "boolean") return `Invalid ${key}`;
+  }
+  return validateOutgoingPrompt("", body.images);
+}
+
+export function scheduledNativeCommand(prompt: string): Record<string, unknown> | null {
+  const match = prompt.match(/^\/(compact|reload|name|btw)(?:\s+([\s\S]*))?$/);
+  if (!match) return null;
+  const args = (match[2] ?? "").trim();
+  switch (match[1]) {
+    case "compact": return { type: "compact", ...(args ? { customInstructions: args } : {}) };
+    case "reload": return { type: "reload" };
+    case "name":
+      if (!args) throw new ExecutionError("Use /name followed by a conversation name");
+      return { type: "set_session_name", name: args };
+    default:
+      if (!args) throw new ExecutionError("Use /btw followed by a question; history is available in the chat");
+      return { type: "btw", question: args };
+  }
+}
+
+/** Validate and retain only the options that can affect native execution. */
+export function executionPromptPayload(body: ExecutionPromptPayload): ExecutionPromptPayload {
+  const optionError = promptOptionsError(body);
+  if (optionError) throw new ExecutionError(optionError);
+  if (typeof body.prompt !== "string" || body.prompt.length > 65_536 || (!body.prompt.trim() && !body.images?.length)) throw new ExecutionError("Prompt must contain text or images, with at most 65536 text characters");
+  if (typeof body.provider !== "string" || !body.provider.trim() || typeof body.modelId !== "string" || !body.modelId.trim()) throw new ExecutionError("A provider and model are required");
+  if (!Number.isFinite(body.runAt)) throw new ExecutionError("Choose a future execution time");
+  const sizeError = validateOutgoingPrompt(body.prompt, body.images);
+  if (sizeError) throw new ExecutionError(sizeError);
+  if (scheduledNativeCommand(body.prompt) && body.images?.length) throw new ExecutionError("This slash command cannot include images; send them in a prompt instead");
+  return {
+    prompt: body.prompt, runAt: body.runAt, provider: body.provider, modelId: body.modelId,
+    ...(body.images !== undefined ? { images: body.images.map(({ data, mimeType }) => ({ data, mimeType })) } : {}),
+    ...(body.thinkingLevel !== undefined ? { thinkingLevel: body.thinkingLevel } : {}),
+    ...(body.toolPreset !== undefined ? { toolPreset: body.toolPreset } : {}),
+    ...(body.fastMode !== undefined ? { fastMode: body.fastMode } : {}),
+    ...(body.slowMode !== undefined ? { slowMode: body.slowMode } : {}),
+    ...(body.advisorEnabled !== undefined ? { advisorEnabled: body.advisorEnabled } : {}),
+  };
+}
+
+function sameScheduledPrompt(left: ExecutionPromptPayload | StoredExecutionJob, right: ExecutionPromptPayload): boolean {
+  return left.prompt === right.prompt && left.runAt === right.runAt && left.provider === right.provider && left.modelId === right.modelId
+    && left.thinkingLevel === right.thinkingLevel && left.toolPreset === right.toolPreset && left.fastMode === right.fastMode
+    && left.slowMode === right.slowMode && left.advisorEnabled === right.advisorEnabled
+    && (left.images ?? []).length === (right.images ?? []).length
+    && (left.images ?? []).every((image, index) => image.data === right.images![index].data && image.mimeType === right.images![index].mimeType);
 }
 
 /** Persist intent before crossing the native creation boundary. */
 export function reserveScheduledChatRequest(draft: ScheduledChatDraft): ScheduledChatCreation {
+  draft = { ...executionPromptPayload(draft), cwd: draft.cwd, requestId: draft.requestId };
   return change((store, dirty) => {
     const previous = store.creations[draft.requestId];
     if (previous) {
@@ -250,7 +322,7 @@ export function moveSessionExecution(oldId: string, newId: string, sessionFile?:
 export function executionWaitEnabled(sessionId: string): boolean { return load().policies[sessionId]?.mode === "wait"; }
 export function cancelAutomaticResumes(sessionId: string): void {
   if (!existsSync(file())) return;
-  change((store, dirty) => { for (const job of store.jobs) if (job.sessionId === sessionId && job.kind === "resume" && (job.status === "pending" || job.status === "waiting")) { job.status = "cancelled"; dirty(); } });
+  change((store, dirty) => { for (const job of store.jobs) if (job.sessionId === sessionId && (job.kind === "resume" || job.continuation) && (job.status === "pending" || job.status === "waiting")) { job.status = "cancelled"; job.updatedAt = Date.now(); dirty(); } });
   for (const receipt of pendingReceipts.get(`${getAgentDir()}:${sessionId}`) ?? []) receipt.automaticResumeCancelled = true;
   errors.delete(`${getAgentDir()}:${sessionId}`);
 }
@@ -258,29 +330,61 @@ export function setExecutionMode(sessionId: string, mode: ExecutionMode, model?:
   if (mode !== "wait" && mode !== "fallback") throw new ExecutionError("Invalid execution mode");
   change((store, dirty) => {
     store.policies[sessionId] = { mode, ...(model ? { model } : {}) };
-    if (mode === "fallback") for (const job of store.jobs) if (job.sessionId === sessionId && job.kind === "resume" && (job.status === "waiting" || job.status === "pending")) job.status = "cancelled";
+    if (mode === "fallback") for (const job of store.jobs) if (job.sessionId === sessionId && (job.kind === "resume" || job.continuation) && (job.status === "waiting" || job.status === "pending")) { job.status = "cancelled"; job.updatedAt = Date.now(); }
     dirty();
   });
   if (mode === "fallback") for (const receipt of pendingReceipts.get(`${getAgentDir()}:${sessionId}`) ?? []) receipt.automaticResumeCancelled = true;
 }
-export function createExecutionJob(sessionId: string, body: { prompt: string; runAt: number; provider: string; modelId: string; requestId?: string }): StoredExecutionJob {
+export function createExecutionJob(sessionId: string, body: ExecutionPromptPayload & { requestId?: string }): StoredExecutionJob {
+  const payload = executionPromptPayload(body);
   return change((store, dirty) => {
     if (body.requestId) {
       const existing = store.jobs.find(j => j.requestId === body.requestId);
       if (existing) {
-        if (existing.sessionId !== sessionId || !sameScheduledPrompt(existing, body)) throw new ExecutionError("Request ID already belongs to a different scheduled prompt", 409);
+        const original = existing.originalRequest ?? store.creations[body.requestId]?.draft ?? existing;
+        if (existing.sessionId !== sessionId || !sameScheduledPrompt(original, payload)) throw new ExecutionError("Request ID already belongs to a different scheduled prompt", 409);
         return { ...existing };
       }
     }
-    if (typeof body.prompt !== "string" || !body.prompt.trim() || body.prompt.length > 65_536) throw new ExecutionError("Prompt must contain between 1 and 65536 characters");
     const creation = body.requestId ? store.creations[body.requestId] : undefined;
     if (creation && (creation.phase !== "created" || creation.sessionId !== sessionId || !sameScheduledPrompt(creation.draft, body))) throw new ExecutionError("Request ID belongs to a different or unconfirmed native conversation", 409);
     const acceptedCreation = creation?.phase === "created" && creation.sessionId === sessionId && sameScheduledPrompt(creation.draft, body);
     if (!Number.isFinite(body.runAt) || (body.runAt <= Date.now() && !acceptedCreation)) throw new ExecutionError("Choose a future execution time");
-    if (typeof body.provider !== "string" || !body.provider.trim() || typeof body.modelId !== "string" || !body.modelId.trim()) throw new ExecutionError("A provider and model are required");
     if (body.requestId !== undefined && (typeof body.requestId !== "string" || body.requestId.length > 128 || !body.requestId)) throw new ExecutionError("Invalid request ID");
-    const job: StoredExecutionJob = { id: randomUUID(), sessionId, kind: "prompt", status: "pending", runAt: body.runAt, prompt: body.prompt, provider: body.provider, modelId: body.modelId, createdAt: Date.now(), ...(body.requestId ? { requestId: body.requestId } : {}) };
+    const createdAt = Date.now();
+    const job: StoredExecutionJob = { ...payload, id: randomUUID(), sessionId, kind: "prompt", status: "pending", createdAt, updatedAt: createdAt, ...(body.requestId ? { requestId: body.requestId, originalRequest: payload } : {}) };
     store.jobs.push(job); dirty(); return { ...job };
+  });
+}
+export function editExecutionJob(sessionId: string, jobId: string, body: ExecutionPromptPayload, expectedUpdatedAt?: number): StoredExecutionJob {
+  const payload = executionPromptPayload(body);
+  if (expectedUpdatedAt !== undefined && !Number.isFinite(expectedUpdatedAt)) throw new ExecutionError("Invalid expected update time");
+  return change((store, dirty) => {
+    const job = store.jobs.find(job => job.sessionId === sessionId && job.id === jobId);
+    if (!job) throw new ExecutionError("Scheduled job not found", 404);
+    if (job.kind !== "prompt" || job.continuation || (job.status !== "pending" && job.status !== "waiting")) throw new ExecutionError("Only an unstarted scheduled prompt can be edited", 409);
+    if (expectedUpdatedAt !== undefined && (job.updatedAt ?? job.createdAt) !== expectedUpdatedAt) throw new ExecutionError("This scheduled prompt changed; reload it before editing", 409);
+    if (payload.runAt <= Date.now()) throw new ExecutionError("Choose a future execution time");
+    if (job.requestId && !job.originalRequest) job.originalRequest = executionPromptPayload(store.creations[job.requestId]?.draft ?? job as ExecutionPromptPayload);
+    for (const key of ["images", "thinkingLevel", "toolPreset", "fastMode", "slowMode", "advisorEnabled"] as const) delete job[key];
+    Object.assign(job, payload);
+    job.updatedAt = Math.max(Date.now(), (job.updatedAt ?? job.createdAt) + 1);
+    job.notBefore = undefined;
+    job.error = undefined;
+    dirty();
+    return { ...job };
+  });
+}
+
+export function dismissExecutionJob(sessionId: string, jobId: string): void {
+  change((store, dirty) => {
+    const job = store.jobs.find(job => job.sessionId === sessionId && job.id === jobId);
+    if (!job) throw new ExecutionError("Scheduled job not found", 404);
+    if (job.status === "pending" || job.status === "waiting" || job.status === "running") throw new ExecutionError("Only a finished scheduled job can be dismissed", 409);
+    if (job.dismissedAt !== undefined) return;
+    job.dismissedAt = Date.now();
+    job.updatedAt = Math.max(Date.now(), (job.updatedAt ?? job.createdAt) + 1);
+    dirty();
   });
 }
 export function cancelExecutionJob(sessionId: string, jobId: string): void {
@@ -289,7 +393,7 @@ export function cancelExecutionJob(sessionId: string, jobId: string): void {
     if (!job) throw new ExecutionError("Scheduled job not found", 404);
     if (job.status === "cancelled") return;
     if (job.status !== "pending" && job.status !== "waiting") throw new ExecutionError("This job has already started or finished; use the chat Stop button for a running turn", 409);
-    job.status = "cancelled"; dirty();
+    job.status = "cancelled"; job.updatedAt = Math.max(Date.now(), (job.updatedAt ?? job.createdAt) + 1); dirty();
   });
 }
 export function setExecutionTime(sessionId: string, runAt: number, jobId?: string): void {
@@ -297,10 +401,11 @@ export function setExecutionTime(sessionId: string, runAt: number, jobId?: strin
   change((store, dirty) => {
     const job = store.jobs.find(j => j.sessionId === sessionId && (jobId ? j.id === jobId : j.kind === "resume") && (j.status === "waiting" || j.status === "pending"));
     if (!job) throw new ExecutionError("No pending job found", 404);
-    job.runAt = runAt; job.notBefore = undefined; job.error = undefined; dirty();
+    if (job.kind === "prompt" && job.requestId && !job.originalRequest) job.originalRequest = executionPromptPayload(store.creations[job.requestId]?.draft ?? job as ExecutionPromptPayload);
+    job.runAt = runAt; job.notBefore = undefined; job.error = undefined; job.updatedAt = Math.max(Date.now(), (job.updatedAt ?? job.createdAt) + 1); dirty();
   });
 }
-export function updateExecutionJob(jobId: string, patch: Partial<Pick<StoredExecutionJob, "status" | "error" | "stage" | "notBefore" | "continuation" | "runAt">>): void {
+export function updateExecutionJob(jobId: string, patch: Partial<Pick<StoredExecutionJob, "status" | "error" | "stage" | "notBefore" | "continuation" | "runAt" | "btwId">>): void {
   change((store, dirty) => {
     const job = store.jobs.find(j => j.id === jobId);
     if (!job || job.status !== "running") return;
@@ -377,10 +482,23 @@ export function recordExecutionEvent(sessionId: string, event: Record<string, un
   flushPendingExecutionReceipts(key);
 }
 
+/** Keep asynchronous control receipts durable without replaying a provider turn. */
+export function recordExecutionControlResult(sessionId: string, jobId: string, status: "completed" | "cancelled" | "failed" | "uncertain", error?: string): void {
+  const key = `${getAgentDir()}:${sessionId}`;
+  const receipts = pendingReceipts.get(key) ?? [];
+  receipts.push({ sessionId, jobId, receivedAt: Date.now(), controlResult: { status, error } });
+  pendingReceipts.set(key, receipts);
+  flushPendingExecutionReceipts(key);
+}
+
 function captureExecutionReceiptOwners(store: Store, receipts: ExecutionReceipt[]): void {
   for (const receipt of receipts) if (receipt.jobId === undefined) {
     const job = store.jobs.find(job => job.sessionId === receipt.sessionId && job.status === "running");
-    receipt.jobId = job?.id ?? null;
+    // Runtime controls have their own response/record lifecycle. Agent frames
+    // from compaction or process exit cannot complete or quota-resume them.
+    const control = job?.kind === "prompt" && !job.continuation && /^\/(?:compact|reload|name|btw)(?:\s|$)/.test(job.prompt);
+    receipt.jobId = control ? null : job?.id ?? null;
+    if (control) receipt.automaticResumeCancelled = true;
     receipt.model = job ? { provider: job.provider, modelId: job.modelId } : store.policies[receipt.sessionId]?.model;
   }
 }
@@ -399,7 +517,21 @@ function flushPendingExecutionReceipts(key: string): void {
           let job = receipt.jobId ? store.jobs.find(job => job.id === receipt.jobId && job.sessionId === sessionId) : undefined;
           // A retained native receipt can resolve a dispatch marked uncertain,
           // but cannot overwrite a later user cancellation or reschedule.
-          if (receipt.jobId && (!job || (job.status !== "running" && job.status !== "uncertain"))) continue;
+          if (receipt.jobId && (!job || job.dismissedAt !== undefined || (job.status !== "running" && job.status !== "uncertain"))) continue;
+          if (job && receipt.controlResult) {
+            job.status = receipt.controlResult.status;
+            job.error = receipt.controlResult.error;
+            job.updatedAt = Date.now();
+            dirty();
+            continue;
+          }
+          if (job && quota && receipt.automaticResumeCancelled) {
+            job.status = "cancelled";
+            job.error = error;
+            job.updatedAt = Date.now();
+            dirty();
+            continue;
+          }
           if (quota && (job || (!receipt.automaticResumeCancelled && store.policies[sessionId]?.mode === "wait"))) {
             if (!job) {
               receipt.resumeJobId ??= randomUUID();
@@ -430,7 +562,7 @@ function flushPendingExecutionReceipts(key: string): void {
   }
   // Only retire native evidence after the metadata transaction committed.
   pendingReceipts.delete(key);
-  for (const receipt of receipts) if (errors.get(key) === receipt.message) errors.delete(key);
+  for (const receipt of receipts) if (receipt.controlResult || errors.get(key) === receipt.message) errors.delete(key);
 }
 
 /** Retry execution metadata only; this never sends or replays a native prompt. */

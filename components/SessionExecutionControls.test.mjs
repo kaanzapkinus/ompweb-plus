@@ -33,6 +33,7 @@ function ScheduleComposer(props) {
   );
 }
 const previousFetch = globalThis.fetch;
+const previousScrollIntoView = window.HTMLElement.prototype.scrollIntoView;
 const endpoint = "/api/sessions/chat-1/execution";
 const currentModel = Object.freeze({ provider: "alpha", modelId: "shared:model" });
 const models = [
@@ -44,6 +45,7 @@ const models = [
 beforeEach(() => {
   window.localStorage.clear();
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  window.HTMLElement.prototype.scrollIntoView = () => {};
 });
 
 async function cleanupComposer() {
@@ -54,6 +56,8 @@ async function cleanupComposer() {
 afterEach(async () => {
   await cleanupComposer();
   globalThis.fetch = previousFetch;
+  if (previousScrollIntoView) window.HTMLElement.prototype.scrollIntoView = previousScrollIntoView;
+  else delete window.HTMLElement.prototype.scrollIntoView;
   delete window.matchMedia;
 });
 
@@ -265,6 +269,7 @@ test("manual quota resume keeps its pinned model readonly while cancellation rem
     },
   });
   assert.equal(screen.queryByText("Old scheduled prompt"), null);
+  await user.click(screen.getByRole("button", { name: /Scheduled prompts/ }));
   await user.click(screen.getByRole("button", { name: "Set resume time" }));
   const dialog = screen.getByRole("dialog", { name: "Set resume time" });
   assert.equal(within(dialog).queryByRole("combobox", { name: "Model" }), null);
@@ -274,6 +279,7 @@ test("manual quota resume keeps its pinned model readonly while cancellation rem
   await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
   const update = requests.find(({ method }) => method === "PUT");
   assert.deepEqual(update.body, { jobId: "quota-1", resumeAt: new Date("2099-01-02T12:00").getTime() });
+  await user.click(screen.getByRole("button", { name: /Scheduled prompts/ }));
   await user.click(screen.getByRole("button", { name: "Cancel", exact: true }));
   await waitFor(() => assert.equal(screen.queryByRole("button", { name: "Cancel", exact: true }), null));
   assert.deepEqual(requests.find(({ method }) => method === "DELETE").body, { jobId: "quota-1" });
@@ -375,6 +381,7 @@ test("saved resume quota choices use the pinned model rather than the current co
     { provider: "saved", modelId: "pinned", fiveHour: { percent: 100, resetsAt: resetAt } },
     { provider: "alpha", modelId: "shared:model", fiveHour: { percent: 100, resetsAt: resetAt + 1000 } },
   ] } });
+  await user.click(screen.getByRole("button", { name: /Scheduled prompts/ }));
   await user.click(screen.getByRole("button", { name: "Set resume time" }));
   const dialog = screen.getByRole("dialog", { name: "Set resume time" });
   await user.click(within(dialog).getByRole("button", { name: "Provider quota reset" }));
@@ -738,6 +745,7 @@ test("manual resume edits never replace an unsubmitted schedule draft", async ()
   await user.type(within(dialog).getByRole("textbox", { name: "Prompt" }), "Keep my new schedule");
   fireEvent.change(within(dialog).getByRole("spinbutton", { name: "Hours" }), { target: { value: "8" } });
   await user.click(within(within(dialog).getByRole("textbox", { name: "Prompt" }).closest("form")).getByRole("button", { name: "Close", exact: true }));
+  await user.click(screen.getByRole("button", { name: /Scheduled prompts/ }));
   await user.click(screen.getByRole("button", { name: "Set resume time" }));
   dialog = screen.getByRole("dialog", { name: "Set resume time" });
   fireEvent.change(within(dialog).getByLabelText("Local date and time"), { target: { value: "2099-05-06T12:00" } });
@@ -796,4 +804,127 @@ test("an old pending response cannot clear a newer draft after navigation and re
   await mount();
   dialog = await openSchedule(user);
   assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "A newer unsent schedule");
+});
+
+test("scheduled jobs stay collapsed while reading and failed records can be dismissed without cancelling", async () => {
+  const user = userEvent.setup();
+  const failed = { id: "failed-1", kind: "prompt", status: "failed", runAt: 1, prompt: "A long scheduled prompt that must not cover the conversation", error: "Invalid model response envelope", createdAt: 1, provider: "alpha", modelId: "shared:model" };
+  const { requests } = await mount({
+    jobs: [failed],
+    onMutation({ body, snapshot }) {
+      return { ...snapshot, jobs: snapshot.jobs.map(job => job.id === body.dismissJobId ? { ...job, dismissedAt: Date.now() } : job) };
+    },
+  });
+  assert.ok(screen.queryByText(failed.prompt) === null, "job details do not occupy conversation space");
+  await user.click(screen.getByRole("button", { name: /Scheduled prompts/ }));
+  const manager = screen.getByRole("dialog", { name: "Scheduled prompts" });
+  assert.ok(within(manager).getByText(failed.error));
+  await user.click(within(manager).getByRole("button", { name: "Dismiss", exact: true }));
+  await waitFor(() => assert.ok(within(manager).queryByRole("button", { name: "Dismiss", exact: true }) === null));
+  assert.deepEqual(requests.find(request => request.method === "PUT").body, { dismissJobId: failed.id });
+  assert.equal(requests.some(request => request.method === "DELETE"), false);
+});
+
+test("editing a scheduled prompt preserves its identity and does not replace the normal unsent schedule", async () => {
+  const user = userEvent.setup();
+  const job = { id: "edit-1", kind: "prompt", status: "pending", runAt: Date.now() + 3_600_000, prompt: "Original scheduled task", createdAt: 1, updatedAt: 2, provider: "alpha", modelId: "shared:model", thinkingLevel: "high" };
+  const { requests } = await mount({
+    jobs: [job],
+    onMutation({ body, snapshot }) { return { ...snapshot, jobs: snapshot.jobs.map(item => item.id === body.jobId ? { ...item, ...body } : item) }; },
+  });
+  let dialog = await openSchedule(user);
+  await user.type(within(dialog).getByRole("textbox", { name: "Prompt" }), "Unsubmitted new schedule");
+  await user.click(within(within(dialog).getByRole("textbox", { name: "Prompt" }).closest("form")).getByRole("button", { name: "Close", exact: true }));
+  await user.click(screen.getByRole("button", { name: /Scheduled prompts/ }));
+  await user.click(within(screen.getByRole("dialog", { name: "Scheduled prompts" })).getByRole("button", { name: "Edit", exact: true }));
+  dialog = screen.getByRole("dialog", { name: "Edit scheduled prompt" });
+  assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, job.prompt);
+  await user.clear(within(dialog).getByRole("textbox", { name: "Prompt" }));
+  await user.type(within(dialog).getByRole("textbox", { name: "Prompt" }), "Edited task");
+  await user.click(within(dialog).getByRole("button", { name: "Save changes", exact: true }));
+  await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Edit scheduled prompt" }), null));
+  const update = requests.find(request => request.method === "PUT").body;
+  assert.equal(update.jobId, job.id);
+  assert.equal(update.prompt, "Edited task");
+  assert.equal(update.thinkingLevel, "high");
+  assert.equal(update.expectedUpdatedAt, job.updatedAt);
+  assert.equal(requests.some(request => request.method === "POST"), false);
+  dialog = await openSchedule(user);
+  assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "Unsubmitted new schedule");
+});
+
+test("new-chat scheduled slash discovery does not create the normal composer's conversation", async () => {
+  const user = userEvent.setup();
+  let normalLoads = 0;
+  let scheduledLoads = 0;
+  globalThis.fetch = async url => {
+    if (String(url).startsWith("/api/commands?cwd=")) {
+      scheduledLoads++;
+      return Response.json({ commands: [{ name: "workspace-audit", description: "Audit this workspace", source: "extension" }] });
+    }
+    if (String(url).startsWith("/api/provider-usage")) return Response.json({ generatedAt: null, reports: [] });
+    throw new Error(`Unexpected request ${url}`);
+  };
+  render(React.createElement(ScheduleComposer, {
+    newSessionCwd: "/tmp/scheduled-workspace", currentModel, models,
+    composerProps: {
+      onSend() {}, onAbort() {}, isStreaming: false,
+      onLoadSlashCommands: async () => { normalLoads++; return []; },
+    },
+  }));
+  const dialog = await openSchedule(user);
+  await user.type(within(dialog).getByRole("textbox", { name: "Prompt" }), "/workspace");
+  await waitFor(() => assert.equal(scheduledLoads, 1));
+  assert.equal(normalLoads, 0, "discovering scheduled commands must not call ensureNewSession");
+  assert.ok(await within(dialog).findByText("/workspace-audit"));
+});
+
+test("an accepted edit preserves newer text and advances its next revision token", async () => {
+  const user = userEvent.setup();
+  let release;
+  let writes = 0;
+  const job = { id: "pending-edit", kind: "prompt", status: "pending", runAt: Date.now() + 3_600_000, prompt: "Original", createdAt: 1, updatedAt: 2, provider: "alpha", modelId: "shared:model" };
+  const { requests } = await mount({
+    jobs: [job],
+    async onMutation({ body, snapshot }) {
+      if (++writes === 1) await new Promise(resolve => { release = resolve; });
+      return { ...snapshot, jobs: [{ ...job, ...body, updatedAt: writes + 2 }] };
+    },
+  });
+  await user.click(screen.getByRole("button", { name: /Scheduled prompts/ }));
+  await user.click(within(screen.getByRole("dialog", { name: "Scheduled prompts" })).getByRole("button", { name: "Edit", exact: true }));
+  const dialog = screen.getByRole("dialog", { name: "Edit scheduled prompt" });
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Prompt" }), { target: { value: "First edit" } });
+  await user.click(within(dialog).getByRole("button", { name: "Save changes", exact: true }));
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Prompt" }), { target: { value: "Newer edit" } });
+  await act(async () => { release(); });
+  assert.equal(screen.getByRole("dialog", { name: "Edit scheduled prompt" }), dialog);
+  assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "Newer edit");
+  await user.click(within(dialog).getByRole("button", { name: "Save changes", exact: true }));
+  await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Edit scheduled prompt" }), null));
+  const second = requests.filter(request => request.method === "PUT")[1].body;
+  assert.equal(second.prompt, "Newer edit");
+  assert.equal(second.expectedUpdatedAt, 3);
+});
+
+test("scheduled Slow availability follows its selected model rather than the background chat", async () => {
+  const user = userEvent.setup();
+  await mount({
+    models: [
+      { provider: "alpha", id: "shared:model", name: "Regular", supportsSlowMode: false },
+      { provider: "beta", id: "flex", name: "Flexible", supportsSlowMode: true },
+    ],
+    composerProps: { slowModeSupported: false },
+  });
+  const dialog = await openSchedule(user);
+  const choice = within(dialog).getByRole("combobox", { name: "Model" });
+  assert.equal(within(dialog).queryByRole("button", { name: "Slow", exact: true }), null);
+  await user.selectOptions(choice, JSON.stringify(["beta", "flex"]));
+  const slow = within(dialog).getByRole("button", { name: "Slow", exact: true });
+  await user.click(slow);
+  assert.equal(slow.getAttribute("aria-pressed"), "true");
+  await user.selectOptions(choice, JSON.stringify(["alpha", "shared:model"]));
+  assert.equal(within(dialog).queryByRole("button", { name: "Slow", exact: true }), null);
+  await user.selectOptions(choice, JSON.stringify(["beta", "flex"]));
+  assert.equal(within(dialog).getByRole("button", { name: "Slow", exact: true }).getAttribute("aria-pressed"), "false");
 });

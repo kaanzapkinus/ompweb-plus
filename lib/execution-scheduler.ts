@@ -1,8 +1,10 @@
 import { existsSync } from "node:fs";
 import { resolveSessionPath, readSessionHeader } from "./session-reader";
-import { getRpcSession, startRpcSession, resolveSpawnCwdResult } from "./rpc-manager";
+import { getRpcSession, startRpcSession, resolveSpawnCwdResult, WebRpcError } from "./rpc-manager";
+import { RpcCommandError } from "./omp/rpc-process";
+import { isBtwRecord, latestBtwTurn, type BtwRecord } from "./btw";
 import { RESUME_PROMPT } from "./session-resume";
-import { claimExecutionJob, findExecutionJob, flushExecutionReceipts, getUnknownQuotaWaits, resolveQuotaWait, updateExecutionJob, type StoredExecutionJob } from "./session-execution";
+import { claimExecutionJob, findExecutionJob, flushExecutionReceipts, getUnknownQuotaWaits, recordExecutionControlResult, resolveQuotaWait, scheduledNativeCommand, updateExecutionJob, type StoredExecutionJob } from "./session-execution";
 import { getProviderUsage, providerQuotaResetTime } from "./provider-usage";
 
 const runtime = globalThis as unknown as { __ompExecutionTimer?: NodeJS.Timeout; __ompExecutionTick?: boolean; __ompQuotaReconcile?: Promise<void> };
@@ -29,28 +31,92 @@ async function dispatch(job: StoredExecutionJob): Promise<void> {
     // or session switch does not, so it still fails closed before dispatch.
     if (findExecutionJob(job.id)?.sessionId !== session.sessionId) throw new Error("Conversation identity changed; scheduled prompt was not sent.");
     job.sessionId = session.sessionId;
-    if (!await session.acquireExecution(job.id)) {
+    if (!await session.acquireExecution(job.id, job)) {
       updateExecutionJob(job.id, { status: "pending", notBefore: Date.now() + 5000 });
       return;
     }
     release = () => session.releaseExecution(job.id);
     await session.send({ type: "set_auto_retry", enabled: false }, job.id);
     await session.send({ type: "set_model", provider: job.provider, modelId: job.modelId }, job.id);
-    unsubscribe = session.onEvent((event) => {
-      if ((event.type === "agent_end" && event.isTerminal !== false) || event.type === "prompt_error" || event.type === "prompt_result") {
-        unsubscribe?.();
+    if (job.thinkingLevel !== undefined && job.thinkingLevel !== "auto") await session.send({ type: "set_thinking_level", level: job.thinkingLevel }, job.id);
+    if (job.fastMode !== undefined) await session.send({ type: "set_fast_mode", enabled: job.fastMode }, job.id);
+    if (job.slowMode !== undefined) await session.send({ type: "set_slow_mode", enabled: job.slowMode }, job.id);
+    const continuation = job.continuation || job.kind === "resume";
+    const control = continuation ? null : scheduledNativeCommand(job.prompt);
+    if (control?.type === "btw") {
+      const releaseSideQuestion = release;
+      let recordId: string | undefined;
+      const records = new Map<string, BtwRecord>();
+      const settle = (record: BtwRecord) => {
+        const turn = latestBtwTurn(record);
+        if (turn.status === "running") return;
+        try {
+          recordExecutionControlResult(session.sessionId, job.id,
+            turn.status === "complete" ? "completed" : turn.status === "cancelled" ? "cancelled" : turn.status === "interrupted" ? "uncertain" : "failed",
+            turn.error);
+        } finally {
+          unsubscribe?.();
+          session.trackExecutionSideQuestion(job.id, false);
+          releaseSideQuestion();
+        }
+      };
+      unsubscribe = session.onEvent(event => {
+        if (event.type === "btw_record" && isBtwRecord(event.record)) {
+          records.set(event.record.id, event.record);
+          if (event.record.id === recordId) settle(event.record);
+        } else if (event.type === "prompt_error") {
+          try {
+            recordExecutionControlResult(session.sessionId, job.id, event.deliveryUncertain ? "uncertain" : "failed",
+              typeof event.errorMessage === "string" ? event.errorMessage : typeof event.error === "string" ? event.error : "The side question failed");
+          } finally {
+            unsubscribe?.();
+            session.trackExecutionSideQuestion(job.id, false);
+            releaseSideQuestion();
+          }
+        }
+      });
+      if (findExecutionJob(job.id)?.sessionId !== session.sessionId) throw new Error("Conversation identity changed; scheduled side question was not sent.");
+      updateExecutionJob(job.id, { stage: "dispatching" });
+      session.trackExecutionSideQuestion(job.id, true);
+      dispatched = true;
+      try {
+        const result = await session.send(control, job.id) as { record?: unknown } | null;
+        if (!isBtwRecord(result?.record)) throw new Error("The side question was sent but no recoverable native record was returned. Check BTW history before asking again.");
+        recordId = result.record.id;
+        updateExecutionJob(job.id, { stage: "active", btwId: recordId });
+        settle(records.get(recordId) ?? result.record);
+        // The record stream now owns release; other turns cannot steal the
+        // selected model while this scheduled side question is still running.
+        release = undefined;
+      } catch (error) {
+        session.trackExecutionSideQuestion(job.id, false);
+        throw error;
       }
-    });
+      return;
+    }
+    if (control) {
+      if (findExecutionJob(job.id)?.sessionId !== session.sessionId) throw new Error("Conversation identity changed; scheduled command was not sent.");
+      updateExecutionJob(job.id, { stage: "dispatching" });
+      dispatched = true;
+      await session.send(control, job.id);
+      recordExecutionControlResult(session.sessionId, job.id, "completed");
+      return;
+    }
     if (findExecutionJob(job.id)?.sessionId !== session.sessionId) throw new Error("Conversation identity changed; scheduled prompt was not sent.");
     updateExecutionJob(job.id, { stage: "dispatching" });
     dispatched = true;
-    await session.send({ type: "prompt", message: job.continuation || job.kind === "resume" ? RESUME_PROMPT : job.prompt }, job.id);
+    await session.send({
+      type: "prompt",
+      message: continuation ? RESUME_PROMPT : job.prompt,
+      ...(!continuation && job.images?.length ? { images: job.images.map(image => ({ type: "image", ...image })) } : {}),
+    }, job.id);
     updateExecutionJob(job.id, { stage: "active" });
     release();
     release = undefined;
   } catch (error) {
     unsubscribe?.();
-    updateExecutionJob(job.id, { status: dispatched ? "uncertain" : "failed", error: error instanceof Error ? error.message : String(error) });
+    const rejected = error instanceof RpcCommandError || (error instanceof WebRpcError && error.code !== "session_unresponsive");
+    updateExecutionJob(job.id, { status: dispatched && !rejected ? "uncertain" : "failed", error: error instanceof Error ? error.message : String(error) });
   } finally { release?.(); }
 }
 

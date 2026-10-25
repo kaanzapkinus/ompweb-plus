@@ -15,7 +15,7 @@ import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
-import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftRecovery, type ChatDraftImage } from "@/lib/draft-store";
+import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedFile } from "./ChatInput-draft-attachments";
 import {
@@ -150,7 +150,7 @@ const TOOL_PRESET_OPTIONS: Array<{ value: ToolPreset; descriptionKey: string }> 
 ];
 
 interface Props {
-  onSend: (message: string, images?: AttachedImage[]) => void;
+  onSend: (message: string, images?: AttachedImage[]) => void | boolean | Promise<void | boolean>;
   /** Ghost-text word completion for the draft (omp `predict_word`); absent = no ghost text. */
   onPredictWord?: PredictWord;
   onPredictWordFeedback?: PredictWordFeedback;
@@ -223,6 +223,17 @@ interface Props {
   onBuiltinCommand?: (message: string) => Promise<BuiltinSlashCommandResult>;
   onAudioUnlock?: () => void;
   draftKey?: string;
+  /** An external owner bypasses the normal chat draft store entirely. Use a
+   * distinct draftKey for each owner, including scheduled edits. */
+  draft?: ChatDraft;
+  onDraftChange?: (draft: ChatDraft) => void;
+  /** Only the supplied local builtin handler may act now; executable commands
+   * are submitted as text, and web prompt commands are expanded without I/O. */
+  deferCommands?: boolean;
+  submitLabel?: string;
+  submitDisabled?: boolean;
+  inputLabel?: string;
+  autoFocus?: boolean;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
   activeGoal?: ActiveGoal | null;
@@ -242,6 +253,8 @@ interface Props {
   /** Hosts policy options owned by the durable execution controller. */
   onExecutionPolicyContainerChange?: (container: HTMLDivElement | null) => void;
 }
+
+export type ChatInputProps = Props;
 
 export interface ChatInputHandle {
   focus: () => void;
@@ -349,6 +362,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onRemoveQueuedMessage,
   onPromoteQueuedToSteer,
   draftKey = "new:unassigned",
+  draft: externalDraft,
+  onDraftChange,
+  deferCommands = false,
+  submitLabel,
+  submitDisabled = false,
+  inputLabel,
+  autoFocus,
   cwd,
   activeGoal,
   activePlan,
@@ -399,7 +419,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     () => new Intl.Collator(locale, { numeric: true, sensitivity: "base" }),
     [locale],
   );
-  const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
+  const [value, setValueState] = useState(() => externalDraft?.value ?? (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [queuedDeleteTarget, setQueuedDeleteTarget] = useState<{
     text: string;
     kind: "follow-up" | "steer";
@@ -417,11 +437,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
   const [plusExpanded, setPlusExpanded] = useState<"tools" | "advisor" | null>(null);
   const [modelSearchQuery, setModelSearchQuery] = useState("");
-  const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
-    draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
+  const [attachedImages, setAttachedImagesState] = useState<AttachedImage[]>(() => (
+    draftImagesToAttachedImages(externalDraft !== undefined ? externalDraft.images : draftKey ? getDraft(draftKey)?.images : [])
   ));
-  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>(() => (
-    draftKey ? draftFilesToAttachedFiles(getDraft(draftKey)?.files) : []
+  const [attachedFiles, setAttachedFilesState] = useState<AttachedFile[]>(() => (
+    draftFilesToAttachedFiles(externalDraft !== undefined ? externalDraft.files : draftKey ? getDraft(draftKey)?.files : [])
   ));
   const [attachError, setAttachError] = useState<string | null>(null);
   const [pendingFileCount, setPendingFileCount] = useState(0);
@@ -444,6 +464,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [fileIndexLoading, setFileIndexLoading] = useState(false);
   const [atServerResult, setAtServerResult] = useState<{ cwd: string; query: string; matches: FileIndexEntry[] } | null>(null);
 
+  const composerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
@@ -478,9 +499,54 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const pendingFileCountRef = useRef(0);
   const uploadControllersRef = useRef(new Set<AbortController>());
   const attachmentCwdRef = useRef(cwd);
+  const draftRevisionRef = useRef(0);
+  const externalDraftRef = useRef(externalDraft);
+  const onDraftChangeRef = useRef(onDraftChange);
+  const receivedExternalDraftRef = useRef(externalDraft);
+  const emittedExternalDraftRef = useRef<ChatDraft | undefined>(undefined);
+  const mountedRef = useRef(true);
+  const submissionPendingRef = useRef(false);
+  const [submissionPending, setSubmissionPending] = useState(false);
+  externalDraftRef.current = externalDraft;
+  onDraftChangeRef.current = onDraftChange;
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
   attachedFilesRef.current = attachedFiles;
+
+  // Update the owner's memory synchronously, before navigation can unmount the
+  // composer. State updaters themselves stay pure, including under StrictMode.
+  const notifyDraftChange = useCallback(() => {
+    draftRevisionRef.current += 1;
+    if (externalDraftRef.current === undefined) return;
+    const next: ChatDraft = {
+      value: valueRef.current,
+      images: attachedImagesRef.current.map(imageToDraftImage),
+      files: attachedFilesRef.current.map(fileToDraftFile),
+    };
+    emittedExternalDraftRef.current = next;
+    onDraftChangeRef.current?.(next);
+  }, []);
+  const setValue = useCallback((update: React.SetStateAction<string>) => {
+    const next = typeof update === "function" ? update(valueRef.current) : update;
+    if (next === valueRef.current) return;
+    valueRef.current = next;
+    setValueState(next);
+    notifyDraftChange();
+  }, [notifyDraftChange]);
+  const setAttachedImages = useCallback((update: React.SetStateAction<AttachedImage[]>) => {
+    const next = typeof update === "function" ? update(attachedImagesRef.current) : update;
+    if (next === attachedImagesRef.current) return;
+    attachedImagesRef.current = next;
+    setAttachedImagesState(next);
+    notifyDraftChange();
+  }, [notifyDraftChange]);
+  const setAttachedFiles = useCallback((update: React.SetStateAction<AttachedFile[]>) => {
+    const next = typeof update === "function" ? update(attachedFilesRef.current) : update;
+    if (next === attachedFilesRef.current) return;
+    attachedFilesRef.current = next;
+    setAttachedFilesState(next);
+    notifyDraftChange();
+  }, [notifyDraftChange]);
 
   const invalidateAttachments = useCallback(() => {
     attachmentRevisionRef.current += 1;
@@ -521,7 +587,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ta.style.height = "auto";
       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
     });
-  }, []);
+  }, [setValue]);
 
 
   useImperativeHandle(ref, () => ({
@@ -628,7 +694,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } finally {
       if (attachmentRevisionRef.current === revision) pendingImageCountRef.current -= imageFiles.length;
     }
-  }, [t]);
+  }, [setAttachedImages, t]);
 
   const processAttachmentFiles = useCallback(async (files: File[]) => {
     if (!files.length) return;
@@ -660,8 +726,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         if (result.status === "fulfilled") saved.push(result.value);
         else errors.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
       }
-      attachedFilesRef.current = [...attachedFilesRef.current, ...saved];
-      setAttachedFiles(attachedFilesRef.current);
+      setAttachedFiles((current) => [...current, ...saved]);
       setAttachError(errors.length ? errors.join(" ") : null);
     } finally {
       uploadControllersRef.current.delete(controller);
@@ -670,7 +735,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         setPendingFileCount(pendingFileCountRef.current);
       }
     }
-  }, [cwd]);
+  }, [cwd, setAttachedFiles]);
 
   const processFiles = useCallback((files: File[]) => {
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
@@ -738,50 +803,91 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       return next;
     });
     setAttachError(null);
-  }, []);
+  }, [setAttachedImages]);
 
   const removeFile = useCallback((index: number) => {
     setAttachedFiles((prev) => prev.filter((_, fileIndex) => fileIndex !== index));
     setAttachError(null);
-  }, []);
+  }, [setAttachedFiles]);
 
   const clearImages = useCallback(() => {
     setAttachedImages((prev) => {
       prev.forEach(revokeImagePreview);
       return [];
     });
-  }, []);
+  }, [setAttachedImages]);
 
   const clearFiles = useCallback(() => {
-    attachedFilesRef.current = [];
     setAttachedFiles([]);
-  }, []);
+  }, [setAttachedFiles]);
 
   const clearInput = useCallback(() => {
     setValue("");
     setAtQuery(null);
     setSlashMatch(null);
     setHistoryMenuOpen(false);
-    if (draftKey) clearDraft(draftKey);
-    if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
+    if (externalDraftRef.current === undefined) {
+      if (draftKey) clearDraft(draftKey);
+      if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
+    }
     clearImages();
     clearFiles();
     invalidateAttachments();
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [clearImages, clearFiles, draftKey, invalidateAttachments]);
+  }, [clearImages, clearFiles, draftKey, invalidateAttachments, setValue]);
 
   useLayoutEffect(() => {
-    if (!draftKey || draftKeyRef.current !== draftKey) return;
+    if (externalDraft === undefined) return;
+    const scopeChanged = draftKeyRef.current !== draftKey;
+    if (!scopeChanged && receivedExternalDraftRef.current === externalDraft) return;
+    receivedExternalDraftRef.current = externalDraft;
+    draftKeyRef.current = draftKey;
+    // Parent echoes are acknowledgements, not draft restorations: replacing
+    // textarea state or image previews here would disturb cursor/selection.
+    if (!scopeChanged && emittedExternalDraftRef.current === externalDraft) return;
+    const imagesChanged = externalDraft.images.length !== attachedImagesRef.current.length
+      || externalDraft.images.some((image, index) => image.data !== attachedImagesRef.current[index]?.data
+        || image.mimeType !== attachedImagesRef.current[index]?.mimeType);
+    const filesChanged = externalDraft.files.length !== attachedFilesRef.current.length
+      || externalDraft.files.some((file, index) => {
+        const current = attachedFilesRef.current[index];
+        return file.path !== current?.path || file.name !== current?.name
+          || file.mimeType !== current?.mimeType || file.size !== current?.size;
+      });
+    if (!scopeChanged && externalDraft.value === valueRef.current && !imagesChanged && !filesChanged) return;
+    draftRevisionRef.current += 1;
+    invalidateAttachments();
+    setAttachError(null);
+    setQueuedDeleteTarget(null);
+    valueRef.current = externalDraft.value;
+    setValueState(externalDraft.value);
+    if (imagesChanged || scopeChanged) {
+      attachedImagesRef.current.forEach(revokeImagePreview);
+      attachedImagesRef.current = draftImagesToAttachedImages(externalDraft.images);
+      setAttachedImagesState(attachedImagesRef.current);
+    }
+    if (filesChanged || scopeChanged) {
+      attachedFilesRef.current = draftFilesToAttachedFiles(externalDraft.files);
+      setAttachedFilesState(attachedFilesRef.current);
+    }
+    setAtQuery(null);
+    setSlashMatch(null);
+    setHistoryMenuOpen(false);
+  }, [externalDraft, draftKey, invalidateAttachments]);
+
+  useLayoutEffect(() => {
+    if (externalDraft !== undefined || !draftKey || draftKeyRef.current !== draftKey) return;
     setDraft(draftKey, {
       value,
       images: attachedImages.map(imageToDraftImage),
       files: attachedFiles.map(fileToDraftFile),
     });
-  }, [attachedImages, attachedFiles, draftKey, value]);
+  }, [attachedImages, attachedFiles, draftKey, externalDraft, value]);
 
   useLayoutEffect(() => {
+    if (externalDraft !== undefined) return;
     const previousDraftKey = draftKeyRef.current;
     if (previousDraftKey === draftKey) return;
 
@@ -811,10 +917,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       return draftImagesToAttachedImages(draft?.images);
     });
     setAttachedFiles(draftFilesToAttachedFiles(draft?.files));
-  }, [draftKey, invalidateAttachments]);
+  }, [draftKey, externalDraft, invalidateAttachments, setValue, setAttachedImages, setAttachedFiles]);
 
   useLayoutEffect(() => subscribeDraftRecovery((key, recovery) => {
-    if (draftKeyRef.current !== key) return;
+    if (externalDraftRef.current !== undefined || draftKeyRef.current !== key) return;
     const { text } = recovery;
     // Merge with pending edits rather than replacing them with a store snapshot.
     setValue((current) => mergeRecoveredText(current, recovery));
@@ -836,7 +942,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ta.style.height = "auto";
       ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
     });
-  }), []);
+  }), [setValue, setAttachedImages, setAttachedFiles]);
 
   useLayoutEffect(() => {
     const ta = textareaRef.current;
@@ -844,10 +950,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     ta.style.height = "auto";
     if (value) ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
   }, [value]);
-  useLayoutEffect(() => () => {
-    attachmentRevisionRef.current += 1;
-    for (const controller of uploadControllersRef.current) controller.abort();
-    uploadControllersRef.current.clear();
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      attachmentRevisionRef.current += 1;
+      for (const controller of uploadControllersRef.current) controller.abort();
+      uploadControllersRef.current.clear();
+    };
   }, []);
 
   useEffect(() => {
@@ -880,9 +990,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const runBuiltinCommand = useCallback(async (msg: string, overrideText?: string): Promise<boolean> => {
     if (!onBuiltinCommand) return false;
     const sentValue = overrideText ?? valueRef.current;
+    const revision = draftRevisionRef.current;
+    const key = draftKeyRef.current;
     const result = await onBuiltinCommand(msg);
     if (!result.handled) return false;
-    if (!result.error && !result.retainInput && (overrideText !== undefined || valueRef.current === sentValue)) clearInput();
+    if (!result.error && !result.retainInput && mountedRef.current
+      && draftKeyRef.current === key && draftRevisionRef.current === revision
+      && (overrideText !== undefined || valueRef.current === sentValue)) clearInput();
     return true;
   }, [onBuiltinCommand, clearInput]);
 
@@ -890,36 +1004,70 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
    * queued. Attachments cannot ride along, so refuse and keep the draft
    * rather than drop them. False when `msg` is not `/btw`. */
   const sendSideQuestion = useCallback((msg: string, overrideText?: string): boolean => {
-    if (!/^\/btw(\s|$)/.test(msg) || !onBuiltinCommand) return false;
+    if (deferCommands || !/^\/btw(\s|$)/.test(msg) || !onBuiltinCommand) return false;
     if (attachedImagesRef.current.length || attachedFilesRef.current.length) {
       toast.error(t("btw.attachmentsUnsupported"));
       return true;
     }
     runBuiltinCommand(msg, overrideText).catch(toastBtwError);
     return true;
-  }, [onBuiltinCommand, runBuiltinCommand, t]);
+  }, [deferCommands, onBuiltinCommand, runBuiltinCommand, t]);
 
   const handleSend = useCallback(async (overrideText?: string) => {
-    if (pendingFileCountRef.current > 0) {
-      setAttachError("Wait for file uploads to finish before sending.");
+    if (submitDisabled || submissionPendingRef.current) return;
+    if (pendingFileCountRef.current > 0 || pendingImageCountRef.current > 0) {
+      setAttachError("Wait for attachments to finish before sending.");
       return;
     }
-    const raw = overrideText ?? value;
+    const raw = overrideText ?? valueRef.current;
     const msg = raw.trim();
     if (!msg && !attachedImagesRef.current.length && !attachedFilesRef.current.length) return;
     if (isStreaming) return;
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
-    const composedMessage = composeMessageWithFileAttachments(msg, attachedFilesRef.current);
-    if (!attachedImagesRef.current.length && !attachedFilesRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
-      const expansion = expandWebSlashCommand(msg);
-      if (expansion.kind === "expand" && rejectsOversizedPrompt(expansion.prompt, attachedImagesRef.current)) return;
-      if (await runBuiltinCommand(msg, overrideText)) return;
+    const revision = draftRevisionRef.current;
+    const key = draftKeyRef.current;
+    const images = attachedImagesRef.current;
+    const files = attachedFilesRef.current;
+    submissionPendingRef.current = true;
+    setSubmissionPending(true);
+    try {
+      let prompt = msg;
+      if (!images.length && !files.length && msg.startsWith("/") && onBuiltinCommand
+        && (!deferCommands || !/^\/btw(\s|$)/.test(msg))) {
+        const expansion = expandWebSlashCommand(msg);
+        if (expansion.kind === "expand" && rejectsOversizedPrompt(expansion.prompt, images)) return;
+        if (await runBuiltinCommand(msg, overrideText)) return;
+      }
+      if (deferCommands && msg.startsWith("/")) {
+        const expansion = expandWebSlashCommand(msg);
+        if (expansion.kind === "usage-error") {
+          toast.error(t("chatInput.commandUsageTitle"), t("agentSession.commandRequiresArgs", {
+            command: expansion.command, usage: t(expansion.argumentHintKey),
+          }));
+          return;
+        }
+        if (expansion.kind === "expand") prompt = expansion.prompt;
+      }
+      if (!mountedRef.current || draftKeyRef.current !== key) return;
+      const composedMessage = composeMessageWithFileAttachments(prompt, files);
+      if (rejectsOversizedPrompt(composedMessage, images)) return;
+      const result = onSend(composedMessage, images.length ? images : undefined);
+      // Keep void callbacks synchronous; asynchronous consumers explicitly
+      // acknowledge acceptance without sacrificing the draft in the meantime.
+      const accepted = typeof result === "object" && result !== null ? await result : result;
+      if (accepted !== false && mountedRef.current && draftKeyRef.current === key
+        && draftRevisionRef.current === revision) clearInput();
+    } catch (error) {
+      if (mountedRef.current && draftKeyRef.current === key) {
+        setAttachError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      submissionPendingRef.current = false;
+      if (mountedRef.current) setSubmissionPending(false);
     }
-    if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
-    onSend(composedMessage, attachedImagesRef.current.length ? attachedImagesRef.current : undefined);
-    clearInput();
-  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion]);
+  }, [submitDisabled, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock,
+    rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion, deferCommands, t]);
   const {
     isRecording,
     isPaused,
@@ -986,6 +1134,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   useEffect(() => {
     if (!(isRecording || isPaused || isReviewing || isTranscribing || transcribeError)) return;
     const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      const modal = document.querySelector('[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]');
+      if (modal && !modal.contains(composerRef.current)) return;
+      if (deferCommands && e.target instanceof Node && !composerRef.current?.contains(e.target)) return;
       if (e.key === "Escape") {
         e.preventDefault();
         cancelDictation();
@@ -1000,9 +1152,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         else stopDictation();
       }
     };
+    if (deferCommands) {
+      const target = composerRef.current;
+      target?.addEventListener("keydown", onKeyDown);
+      return () => target?.removeEventListener("keydown", onKeyDown);
+    }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isRecording, isPaused, isReviewing, isTranscribing, transcribeError, cancelDictation, retryDictation, confirmTranscribeDictation, stopDictation]);
+  }, [deferCommands, isRecording, isPaused, isReviewing, isTranscribing, transcribeError, cancelDictation, retryDictation, confirmTranscribeDictation, stopDictation]);
 
   const slashQuery = slashMatch?.query ?? null;
   const isMidPromptSkillLookup = slashMatch?.mode === "mid-prompt";
@@ -1259,7 +1416,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       el.style.height = "auto";
       el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     });
-  }, [atQuery, value]);
+  }, [atQuery, value, setValue]);
 
   useEffect(() => {
     if (atActiveIndex >= atMatches.length) {
@@ -1304,7 +1461,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ta.style.height = "auto";
       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
     });
-  }, []);
+  }, [setValue]);
 
   const applySlashCommand = useCallback((command: SlashCommandPaletteItem) => {
     const ta = textareaRef.current;
@@ -1346,9 +1503,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       el.style.height = "auto";
       el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     });
-  }, [slashMatch, value]);
+  }, [slashMatch, value, setValue]);
 
   const sendQueued = useCallback((mode: "steer" | "followup", overrideText?: string) => {
+    if (submissionPendingRef.current || submitDisabled) return;
     if (pendingFileCountRef.current > 0) {
       setAttachError("Wait for file uploads to finish before sending or queueing.");
       return;
@@ -1415,7 +1573,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       recoverOnFailure(onFollowUp(composedMessage, images));
     }
     clearInput();
-  }, [value, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, sendSideQuestion]);
+  }, [value, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, sendSideQuestion, submitDisabled]);
   // A typed message or attachment during a run is a queued follow-up — and so
   // is a dictation in progress: the primary button must take the same state it
   // would have if the composer already held text. Keep Stop as the action
@@ -1696,7 +1854,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, toggleDictation, wordPrediction]
+    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, setValue, toggleDictation, wordPrediction]
   );
 
 
@@ -1962,6 +2120,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   return (
     <div
+      ref={composerRef}
+      onKeyDown={deferCommands ? (event) => {
+        // Keep handled composer actions and submission/shortcut keys from
+        // reaching the background chat. Unhandled Escape still closes Dialog.
+        if (event.defaultPrevented || event.key === "Enter" || event.metaKey || event.ctrlKey) event.stopPropagation();
+      } : undefined}
       role="group"
       aria-label={t("chatInput.composerLabel")}
       style={{
@@ -2085,6 +2249,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
                 />
                 <button
+                  type="button"
                   className="attachment-remove-button"
                   onClick={() => removeImage(i)}
                   title={t("chatInput.removeImage")}
@@ -2143,6 +2308,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   {file.size < 1024 ? `${file.size} B` : `${Math.round(file.size / 1024)} KB`}
                 </span>
                 <button
+                  type="button"
                   className="attachment-remove-button"
                   onClick={() => removeFile(i)}
                   title={t("chatInput.removeFile")}
@@ -2764,6 +2930,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         )}
           <div
             className="chat-input-shell"
+            onDragOver={event => {
+              if (event.dataTransfer.types.includes("Files")) {
+                event.preventDefault();
+                event.stopPropagation();
+              }
+            }}
+            onDrop={event => {
+              if (!event.dataTransfer.files.length) return;
+              event.preventDefault();
+              event.stopPropagation();
+              processFiles(Array.from(event.dataTransfer.files));
+            }}
             style={{
               display: "flex",
               flexDirection: "column",
@@ -2797,6 +2975,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           <GhostMirror ref={ghostMirrorRef} textareaRef={textareaRef} prediction={wordPrediction} value={value} />
           <textarea
             ref={textareaRef}
+            autoFocus={autoFocus}
             value={value}
             onChange={(e) => {
               setValue(e.target.value);
@@ -2831,7 +3010,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             }}
             onPaste={handlePaste}
             placeholder={t("chatInput.placeholder")}
-            aria-label={t("chatInput.composerLabel")}
+            aria-label={inputLabel ?? t("chatInput.composerLabel")}
             role={composerMenuId ? "combobox" : undefined}
             aria-expanded={composerMenuId ? true : undefined}
             aria-controls={composerMenuId}
@@ -3048,6 +3227,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {(modelOptions.length > 0 || currentName || modelError || showModelsLoading) && onModelChange && (
               <div ref={dropdownRef} className="composer-model-control" style={{ position: "relative", minWidth: 0 }}>
                 <button
+                  type="button"
                   ref={modelTriggerRef}
                   onClick={() => setModelDropdownOpen((v) => !v)}
                   disabled={modelSelectorDisabled}
@@ -3161,6 +3341,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {onThinkingLevelChange && (
               <div ref={thinkingDropdownRef} className="composer-thinking-control" style={{ position: "relative", minWidth: 0 }}>
                 <button
+                  type="button"
                   onClick={() => setThinkingDropdownOpen((v) => !v)}
                   disabled={isStreaming}
                   title={t("chatInput.changeReasoningTitle", { level: thinkingDisplayLabel })}
@@ -3220,6 +3401,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         const displayLabel = (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
                         return (
                           <button
+                            type="button"
                             className="picker-row picker-thinking-card"
                             data-active={isActive}
                             role="menuitemradio"
@@ -3524,7 +3706,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     sendQueued("followup");
                   }
                 }}
-                disabled={isTranscribing || pendingFileCount > 0}
+                disabled={submitDisabled || submissionPending || isTranscribing || pendingFileCount > 0}
                 title={t("chatInput.queueMessage")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
@@ -3569,8 +3751,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 type="button"
                 className="composer-primary-action"
                 onClick={isRecording || isPaused || isReviewing ? () => stopAndFinishDictation("send") : () => void handleSend()}
-                disabled={isTranscribing || pendingFileCount > 0 || !(isRecording || isPaused || isReviewing || value.trim() || attachedImages.length || attachedFiles.length)}
-                title={isRecording || isPaused || isReviewing ? t("chatInput.sendDictation") : t("chatInput.send")}
+                disabled={submitDisabled || submissionPending || isTranscribing || pendingFileCount > 0 || !(isRecording || isPaused || isReviewing || value.trim() || attachedImages.length || attachedFiles.length)}
+                title={submitLabel ?? (isRecording || isPaused || isReviewing ? t("chatInput.sendDictation") : t("chatInput.send"))}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   background: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || attachedImages.length || attachedFiles.length) ? "var(--accent-strong)" : "var(--bg-panel)",
@@ -3584,7 +3766,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   transition: "background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
                 }}
               >
-                {isTranscribing ? (
+                {isTranscribing || submissionPending ? (
                   <Loader2 size={12} strokeWidth={2} className="animate-spin" aria-hidden="true" />
                 ) : (
                   <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -3592,7 +3774,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <polyline points="7.5 3 12 7 7.5 11" />
                   </svg>
                 )}
-                {t("chatInput.send")}
+                {submitLabel ?? t("chatInput.send")}
               </button>
             )}
           </div>

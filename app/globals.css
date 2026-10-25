@@ -4885,10 +4885,13 @@ html[data-compact="true"] .omp-suggestion-panel {
 .execution-controls button:hover:not(:disabled), .execution-dialog button:hover:not(:disabled) { background: var(--bg-hover); }
 .execution-hint { margin: 5px 0; color: var(--text-dim); font-size: 11px; line-height: 1.5; }
 .execution-error { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--status-error); overflow-wrap: anywhere; }
-.execution-jobs { list-style: none; max-height: min(160px, calc(var(--omp-vv-height, 100dvh) / var(--ui-scale, 1) * 0.2)); overflow-y: auto; overscroll-behavior: contain; margin: 6px 0 0; padding: 0; }
+.execution-summary { width: 100%; min-width: 0; border: none !important; background: transparent !important; justify-content: flex-start !important; color: var(--text-muted) !important; }
+.execution-summary > span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.execution-summary-status { margin-left: auto; font-size: 11px; white-space: nowrap; }
+.execution-jobs { list-style: none; margin: 0; padding: 0; }
 .execution-jobs li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; padding: 6px 0; border-top: 1px solid var(--border); }
 .execution-job-text { display: grid; gap: 3px; min-width: 0; flex: 1 1 180px; overflow-wrap: anywhere; }
-.execution-job-text > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.execution-job-text > span { white-space: pre-wrap; max-height: 9em; overflow-y: auto; }
 .execution-job-text small { color: var(--text-dim); }
 .execution-job-actions { display: flex; flex-wrap: wrap; align-items: start; gap: 5px; }
 .execution-history { margin-top: 4px; }
@@ -4922,10 +4925,15 @@ html[data-compact="true"] .omp-suggestion-panel {
 .execution-dialog-body { display: grid; align-content: start; flex: 1 1 auto; gap: 12px; min-height: 0; min-width: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 12px; padding: 0 16px 12px; -webkit-overflow-scrolling: touch; }
 .execution-dialog label { display: grid; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
 .execution-dialog textarea, .execution-dialog input, .execution-dialog select { width: 100%; min-width: 0; max-width: 100%; padding: 8px; }
-.execution-dialog textarea { resize: vertical; min-height: 72px; }
+.execution-dialog textarea { resize: none; min-height: 72px; max-height: 200px; }
 .execution-model { margin: 0; color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; }
 .execution-dialog-actions { display: flex; flex: 0 0 auto; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--bg-panel); }
 .execution-dialog-actions button:last-child { color: var(--accent); border-color: var(--accent); }
+.execution-dialog .chat-input-shell { margin-top: 4px; }
+.execution-dialog .composer-primary-action { margin-left: auto; }
+.execution-manager { max-height: min(640px, calc((var(--omp-vv-height, 100dvh) - 16px) / var(--ui-scale, 1))); }
+.execution-history summary { padding: 8px 0; cursor: pointer; }
+.execution-history .execution-jobs { opacity: 0.8; }
 @media (max-width: 767px), (hover: none), (pointer: coarse) {
   .execution-controls { padding-inline: 8px; font-size: 13px; }
   .execution-controls button, .execution-controls select, .execution-dialog button, .execution-dialog select, .execution-dialog input { min-height: max(44px, calc(44px / var(--ui-scale, 1))); }
@@ -4939,9 +4947,9 @@ html[data-compact="true"] .omp-suggestion-panel {
   .execution-dialog-header > button { min-width: max(44px, calc(44px / var(--ui-scale, 1))); }
   .execution-dialog-body { gap: clamp(6px, calc(var(--omp-vv-height, 100dvh) / var(--ui-scale, 1) * 0.012), 8px); padding: 0 12px 8px; scroll-padding-block: 8px; }
   .execution-dialog label { gap: 4px; }
-  .execution-dialog textarea { resize: none; min-height: 56px; max-height: clamp(56px, calc(var(--omp-vv-height, 100dvh) / var(--ui-scale, 1) * 0.15), 100px); }
+  .execution-dialog textarea { min-height: 56px; max-height: 200px; }
   .execution-dialog .execution-hint { margin: 3px 0; line-height: 1.35; }
-  .execution-dialog-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; padding: 6px 12px; }
+  .execution-dialog-actions { gap: 6px; padding: 6px 12px; }
   .execution-dialog-actions button { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 }
 /* Schedule dialog: timing mode tabs and delay fields */
@@ -4964,6 +4972,6 @@ html[data-compact="true"] .omp-suggestion-panel {
   .execution-dialog-header { padding-block: 4px; }
   .execution-dialog-body { gap: 6px; padding-bottom: 6px; }
   .execution-dialog-actions { padding-block: 4px; }
-  .execution-dialog textarea { min-height: 56px; max-height: 88px; }
+  .execution-dialog textarea { min-height: 56px; }
   .execution-timing-tabs { margin-bottom: 6px; }
 }

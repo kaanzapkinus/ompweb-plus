@@ -1193,7 +1193,24 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       onDrop={handleDrop}
     >
       <SessionMetricsPanel metrics={sessionMetrics} />
-      {(session?.id || newSessionCwd) && <SessionExecutionControls key={session?.id ?? `new:${newSessionCwd}`} sessionId={session?.id} newSessionCwd={newSessionCwd} onSessionCreated={onSessionCreated} currentModel={displayModelValue} models={modelList} modelsLoading={modelsLoading} scheduleOpen={scheduleOpen} onScheduleOpenChange={setScheduleOpen} onScheduleAvailabilityChange={setScheduleAvailable} scheduleReturnFocus={scheduleReturnFocus} policyContainer={executionPolicyContainer} />}
+      {(session?.id || newSessionCwd) && <SessionExecutionControls
+        key={session?.id ?? `new:${newSessionCwd}`}
+        sessionId={session?.id}
+        newSessionCwd={newSessionCwd}
+        onSessionCreated={onSessionCreated}
+        currentModel={displayModelValue}
+        models={modelList}
+        modelsLoading={modelsLoading}
+        composerProps={chatInputElement.props}
+        thinkingLevelsByModel={modelThinkingLevels}
+        thinkingMapsByModel={modelThinkingLevelMaps}
+        onStop={job => { if (job.btwId) void btw.cancel(job.btwId); else void handleAbort(); }}
+        scheduleOpen={scheduleOpen}
+        onScheduleOpenChange={setScheduleOpen}
+        onScheduleAvailabilityChange={setScheduleAvailable}
+        scheduleReturnFocus={scheduleReturnFocus}
+        policyContainer={executionPolicyContainer}
+      />}
       {isDragOver && (
         <div className="drop-zone-overlay pointer-events-none absolute inset-0 z-50 flex items-center justify-center backdrop-blur-[1px]">
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">

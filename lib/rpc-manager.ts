@@ -16,7 +16,8 @@ import {
   resolveSessionPath,
 } from "./session-reader";
 import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, takeInterruptedSessions } from "./session-resume";
-import { PRESET_FULL } from "./tool-presets";
+import { getToolNamesForPreset, PRESET_FULL } from "./tool-presets";
+import type { ExecutionPromptOptions } from "./session-execution-types";
 import { comparableProjectPath } from "./comparable-path";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
@@ -25,7 +26,7 @@ import { publishNotification } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
 import { eventWithToolResultImageUrls } from "./media-cache";
-import { cancelAutomaticResumes, executionSpawnArgs, executionWaitEnabled, getExecutionSnapshot, hasRunningExecution, moveSessionExecution, recordExecutionEvent } from "./session-execution";
+import { cancelAutomaticResumes, executionSpawnArgs, executionWaitEnabled, getExecutionSnapshot, hasRunningExecution, moveSessionExecution, recordExecutionControlResult, recordExecutionEvent } from "./session-execution";
 import type {
   BashResultInfo,
   OmpModel,
@@ -201,7 +202,8 @@ export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[],
     // omp's createSessionManager opens it directly via SessionManager.open
     // without any interactive resume/fork prompts (main.ts resume handling).
     args.push("--resume", sessionFile);
-  } else if (toolNames !== undefined) {
+  }
+  if (toolNames !== undefined) {
     const presetKey = toolNames.map((n) => n.toLowerCase()).sort().join(",");
     if (toolNames.length === 0) {
       args.push("--no-tools");
@@ -296,6 +298,7 @@ interface IdentityChangeOptions {
 
 export class AgentSessionWrapper {
   private executionOwner: string | null = null;
+  private executionSideQuestionOwner: string | null = null;
   private executionNoFallbackSpawned = false;
   private executionModel: { provider: string; modelId: string } | null = null;
   private listeners: EventListener[] = [];
@@ -372,7 +375,11 @@ export class AgentSessionWrapper {
   /** Whether the child was spawned with --advisor. The flag is spawn-time
    * only (no runtime RPC toggles it), so applying a changed advisor setting
    * means replacing an idle child on the next startRpcSession call. */
-  readonly advisorSpawned: boolean;
+  private _advisorSpawned: boolean;
+  private spawnToolNames: string[] | undefined;
+  private executionAdvisorOverride: boolean | undefined;
+
+  get advisorSpawned(): boolean { return this._advisorSpawned; }
   /** The cwd recorded in the session file header; null for brand-new sessions
    * or when the header lacks one. Used to detect a spawn fallback so a notice
    * can warn the user the agent is running in a different directory. */
@@ -389,11 +396,13 @@ export class AgentSessionWrapper {
     /** Test seam: the real value is DISCONNECT_DESTROY_MS (120s), far too long
      *  for a unit test. 0 disables reaping for that wrapper. */
     disconnectDestroyMs: number = DISCONNECT_DESTROY_MS,
+    toolNames?: string[],
   ) {
     this.proc = proc;
     this.cwd = cwd;
     this.recordedCwd = recordedCwd ?? null;
-    this.advisorSpawned = advisorSpawned;
+    this._advisorSpawned = advisorSpawned;
+    this.spawnToolNames = toolNames;
     this._sessionId = expectedSessionId;
     this.executionNoFallbackSpawned = executionWaitEnabled(expectedSessionId) || hasRunningExecution(expectedSessionId);
     this.disconnectDestroyMs = disconnectDestroyMs;
@@ -412,10 +421,12 @@ export class AgentSessionWrapper {
   }
 
   isRunning(): boolean {
-    return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning);
+    return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning || this.executionSideQuestionOwner !== null);
   }
 
-  async acquireExecution(jobId: string): Promise<boolean> {
+  hasExecutionOwner(): boolean { return this.executionOwner !== null; }
+
+  async acquireExecution(jobId: string, options?: Pick<ExecutionPromptOptions, "toolPreset" | "advisorEnabled">): Promise<boolean> {
     if (!this.isAlive() || this.isRunning() || this.restarting || this.pendingCommands > 0 || this.executionOwner) return false;
     this.executionOwner = jobId;
     try {
@@ -424,8 +435,21 @@ export class AgentSessionWrapper {
         this.executionOwner = null;
         return false;
       }
-      // Establish the no-fallback child before setting the pinned model.
-      if (!this.executionNoFallbackSpawned) await this.restart();
+      // Apply spawn-only choices while this same wrapper owns the command gate.
+      // Explicit scheduled tools also apply on resume; no runtime setter exists.
+      let changed = false;
+      if (options?.toolPreset !== undefined) {
+        const tools = getToolNamesForPreset(options.toolPreset);
+        changed = JSON.stringify(tools ?? null) !== JSON.stringify(this.spawnToolNames ?? null);
+        this.spawnToolNames = tools;
+      }
+      if (options?.advisorEnabled !== undefined) {
+        changed ||= this.advisorSpawned !== options.advisorEnabled;
+        this.executionAdvisorOverride = options.advisorEnabled;
+        this._advisorSpawned = options.advisorEnabled;
+      }
+      // Establish the no-fallback child before setting model/runtime options.
+      if (!this.executionNoFallbackSpawned || changed) await this.restart();
       return true;
     } catch (error) {
       this.executionOwner = null;
@@ -435,6 +459,15 @@ export class AgentSessionWrapper {
 
   releaseExecution(jobId: string): void {
     if (this.executionOwner === jobId) this.executionOwner = null;
+  }
+
+  trackExecutionSideQuestion(jobId: string, active: boolean): void {
+    if (active) {
+      if (this.executionOwner !== jobId) throw new WebRpcError("The scheduled side question no longer owns execution", "session_execution_busy");
+      this.executionSideQuestionOwner = jobId;
+    } else if (this.executionSideQuestionOwner === jobId) {
+      this.executionSideQuestionOwner = null;
+    }
   }
 
   /** A web UI (SSE stream) is currently attached to this session. */
@@ -700,6 +733,11 @@ export class AgentSessionWrapper {
     // Recorded before destroy(): its running-change broadcast must carry the
     // record so sidebars that missed the notice below still see the exit.
     if (this._sessionId) getExitedMap().set(this._sessionId, { id: this._sessionId, cwd: this.cwd, at: Date.now(), code, signal, detail });
+    if (this.executionSideQuestionOwner) {
+      try { recordExecutionControlResult(this._sessionId, this.executionSideQuestionOwner, "uncertain", `OMP process exited (${status}); side-question completion could not be confirmed.`); }
+      catch (error) { console.error("[omp-web] execution receipt failed:", error); }
+      this.executionSideQuestionOwner = null;
+    }
     this.emit({
       type: "notice",
       level: "error",
@@ -1481,7 +1519,10 @@ export class AgentSessionWrapper {
         // Re-read per spawn so a restart picks up environment values the user
         // added in Settings after this session was created (#104).
         env: getAgentEnvOverrides(),
-        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)),
+        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", this.spawnToolNames, this.advisorSpawned, {
+          ...launchConfigForCwd(this.cwd),
+          ...(this.executionAdvisorOverride !== undefined ? { advisor: this.executionAdvisorOverride } : {}),
+        }),
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
@@ -1530,8 +1571,10 @@ export class AgentSessionWrapper {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (!this.isAlive()) throw new Error("Session is no longer running");
     const type = String(command.type);
-    if (this.executionOwner && this.executionOwner !== executionOwner && !type.startsWith("get_") && !type.startsWith("predict_word")) {
-      throw new WebRpcError("A scheduled prompt is starting; retry this action after it starts.", "session_execution_busy");
+    const stoppingExecution = (type === "btw_cancel" && this.executionSideQuestionOwner !== null)
+      || (this.isRunning() && (type === "abort" || type === "abort_compaction" || type === "abort_and_restore_queue"));
+    if (this.executionOwner && this.executionOwner !== executionOwner && !stoppingExecution && !type.startsWith("get_") && !type.startsWith("predict_word")) {
+      throw new WebRpcError("A scheduled prompt owns execution; retry this action after it finishes.", "session_execution_busy");
     }
     this.resetIdleTimer();
     // Includes preparation awaits so neither reaping nor the scheduler can
@@ -2196,8 +2239,8 @@ function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
 /**
  * Get or create the omp RPC process for the given session.
  * For new sessions (sessionFile === ""), omp generates its own id.
- * Pass toolNames to pre-configure the builtin toolset of a NEW session
- * (empty array = all tools disabled); ignored when resuming.
+ * Explicit toolNames pre-configure the builtin toolset, including on resume
+ * (empty array = all tools disabled). Scheduled changes use acquireExecution.
  */
 export async function startRpcSession(
   sessionId: string,
@@ -2229,7 +2272,7 @@ export async function startRpcSession(
     // children are kept (a mid-run swap would drop in-flight work) and pick
     // the new flag up at the next natural respawn; callers that pass no
     // advisor opinion (undefined) simply reuse whatever is running.
-    if (advisor === undefined || existing.advisorSpawned === effectiveAdvisor || existing.isRunning()) {
+    if (advisor === undefined || existing.advisorSpawned === effectiveAdvisor || existing.isRunning() || existing.hasExecutionOwner()) {
       return { session: existing, realSessionId: sessionId };
     }
     await existing.destroyAndWait();
@@ -2271,6 +2314,8 @@ export async function startRpcSession(
       recordedCwd,
       advisor === true || launchConfig?.advisor === true,
       sessionFile ? sessionId : "",
+      undefined,
+      toolNames,
     );
     holder.wrapper = created;
     created.start();

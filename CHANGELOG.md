@@ -4,6 +4,16 @@ This file records OMPWeb Plus changes above its integrated upstream baseline and
 
 ---
 
+## Unreleased
+
+### Fixes & Improvements
+
+- Collapse scheduled-job details into a compact status row; manage, edit, cancel, and dismiss terminal jobs without obscuring the conversation.
+- Use the normal composer for scheduled prompts, including slash discovery, model-specific reasoning/Fast/Slow choices, tool presets, advisor, attachments, and automatic text growth. Discovery does not create a conversation and has a bounded child-process lifetime.
+- Preserve newer draft edits during asynchronous submission and scheduled-job updates; block duplicate queue submissions while acceptance is pending and keep dropped attachments with the targeted composer.
+- Keep scheduled image payloads out of background polling and browser-local storage; preserve original request identities and explicitly recover or reject ambiguous image retries rather than silently losing attachments.
+- Retain uncertain prompt-acknowledgement outcomes and terminal receipts; preserve execution ownership through advisor-driven session reconciliation and support native cancellation for scheduled side questions.
+
 ## OMPWeb Plus 0.5.2-plus.1
 
 ### Fixes & Improvements

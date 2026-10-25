@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { allowFileRoot } from "@/lib/file-access";
-import { startRpcSession, type AgentSessionWrapper } from "@/lib/rpc-manager";
+import { startRpcSession, WebRpcError, type AgentSessionWrapper } from "@/lib/rpc-manager";
+import { RpcCommandError } from "@/lib/omp/rpc-process";
+import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
 import { runUtilityCommand } from "@/lib/omp/rpc-utility";
 import { invalidateSessionListCache, listAllSessions, readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
-import { beginScheduledChatCreation, createExecutionJob, ExecutionError, findExecutionRequest, getExecutionSnapshot, recordScheduledChatSession, reserveScheduledChatRequest, type ScheduledChatCreation, type ScheduledChatDraft } from "@/lib/session-execution";
+import { beginScheduledChatCreation, createExecutionJob, executionPromptPayload, ExecutionError, findExecutionRequest, getExecutionResponseSnapshot, recordScheduledChatSession, reserveScheduledChatRequest, type ScheduledChatCreation, type ScheduledChatDraft } from "@/lib/session-execution";
 import { getAgentDir } from "@/lib/omp/paths";
 import type { ExecutionSnapshot } from "@/lib/session-execution-types";
 import type { SessionInfo } from "@/lib/types";
@@ -21,7 +23,7 @@ async function responseFor(sessionId: string) {
   invalidateSessionListCache();
   const session = (await listAllSessions()).find(item => item.id === sessionId);
   if (!session) throw new ExecutionError("The saved conversation could not be loaded. Retry to recover the scheduled prompt.", 500);
-  return { ...getExecutionSnapshot(sessionId), session };
+  return { ...getExecutionResponseSnapshot(sessionId), session };
 }
 
 async function create(draft: Draft, creation: Creation, journal: ScheduledChatCreation): Promise<Result> {
@@ -62,7 +64,7 @@ async function create(draft: Draft, creation: Creation, journal: ScheduledChatCr
       recordScheduledChatSession(draft.requestId, creation.sessionId, creation.sessionFile);
       if (!existsSync(creation.sessionFile)) throw new ExecutionError("The native conversation file was not persisted. Restore it before retrying this request.", 500);
     }
-    await session.send({ type: "set_session_name", name: draft.prompt.slice(0, 80) });
+    await session.send({ type: "set_session_name", name: draft.prompt.trim().slice(0, 80) || "Scheduled image prompt" });
     // Naming a resumed native file can itself trigger an ownership move.
     // Reconcile that supported state boundary before attaching the job.
     await session.send({ type: "get_state" });
@@ -75,16 +77,27 @@ async function create(draft: Draft, creation: Creation, journal: ScheduledChatCr
   }
 }
 
+/** Recover a lost POST response without replaying its prompt or attachments. */
+export async function GET(req: Request) {
+  try {
+    const requestId = new URL(req.url).searchParams.get("requestId");
+    if (!requestId || !/^[a-f0-9]{32}$/.test(requestId)) throw new ExecutionError("A valid schedule request ID is required");
+    const job = findExecutionRequest(requestId);
+    if (!job) throw new ExecutionError("No accepted scheduled prompt was found. Check recent conversations before scheduling a new request; attachments must be reattached explicitly.", 404);
+    return NextResponse.json(await responseFor(job.sessionId), { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: error instanceof ExecutionError ? error.status : 500 });
+  }
+}
+
 export async function POST(req: Request) {
   try {
     if (process.env.OMP_WEB_SCHEDULER_DISABLED === "1") throw new ExecutionError("Execution is disabled on this verification server", 503);
-    const body = await parseJsonWithinLimit(req, 128 * 1024) as Partial<Draft>;
+    const body = await parseJsonWithinLimit(req, MAX_AGENT_COMMAND_REQUEST_BYTES) as Partial<Draft>;
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new ExecutionError("Expected an object");
     if (typeof body.cwd !== "string" || !body.cwd || !existsSync(body.cwd) || !statSync(body.cwd).isDirectory()) throw new ExecutionError("Choose an existing workspace directory");
-    if (typeof body.prompt !== "string" || !body.prompt.trim() || body.prompt.length > 65_536) throw new ExecutionError("Prompt must contain between 1 and 65536 characters");
-    if (typeof body.provider !== "string" || !body.provider.trim() || typeof body.modelId !== "string" || !body.modelId.trim()) throw new ExecutionError("A provider and model are required");
     if (typeof body.requestId !== "string" || !/^[a-f0-9]{32}$/.test(body.requestId)) throw new ExecutionError("A valid schedule request ID is required");
-    const draft: Draft = { cwd: realpathSync(body.cwd), prompt: body.prompt.trim(), runAt: body.runAt as number, provider: body.provider, modelId: body.modelId, requestId: body.requestId };
+    const draft: Draft = { ...executionPromptPayload(body as Draft), cwd: realpathSync(body.cwd), requestId: body.requestId };
     const previous = findExecutionRequest(draft.requestId);
     if (previous) {
       const file = await resolveSessionPath(previous.sessionId);
@@ -111,6 +124,9 @@ export async function POST(req: Request) {
       if (!creation.sessionId) creations.delete(key);
     }
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: error instanceof ExecutionError ? error.status : error instanceof RequestBodyTooLargeError ? 413 : error instanceof SyntaxError ? 400 : 500 });
+    return NextResponse.json({
+      error: error instanceof Error ? error.message : String(error),
+      ...(error instanceof WebRpcError || error instanceof RpcCommandError ? { code: error.code ?? "rpc_command_failed" } : {}),
+    }, { status: error instanceof ExecutionError ? error.status : error instanceof RequestBodyTooLargeError ? 413 : error instanceof SyntaxError || error instanceof WebRpcError || error instanceof RpcCommandError ? 400 : 500 });
   }
 }
