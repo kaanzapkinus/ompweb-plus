@@ -1106,6 +1106,11 @@ export function invalidateSessionFileListCache(): void {
 }
 
 export async function listSessionFiles(sessionsRoot: string): Promise<string[]> {
+  return listSessionFilesSync(sessionsRoot);
+}
+
+/** Synchronous baseline for observers that must start tracking before returning. */
+export function listSessionFilesSync(sessionsRoot: string): string[] {
   let rootStat: { mtimeMs: number };
   try {
     rootStat = statSync(sessionsRoot);

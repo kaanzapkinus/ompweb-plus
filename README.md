@@ -86,6 +86,7 @@ The fork retains the upstream browser/OMP architecture and adds the mobile, orga
 - Message copying as rendered plain text or original Markdown, excluding reasoning/tool/control chrome. Oversized raw-text views copy the full source.
 - Project browsing, managed project cloning, file tabs/previews, Git worktrees, session import/export, archive/restore, deep links, forks into separate conversations, and branches within a conversation. Archiving is explicit; there is no automatic age-based archive policy.
 - The file viewer follows ordinary and atomic writes, including deletion and recreation, rather than remaining stuck on the old file.
+- External OMP session-file changes refresh saved-chat views. Watcher startup stays read-only and reconciles metadata until the native watcher begins delivering events; it does not write probe files or poll transcript contents.
 - Native queues are shared across devices. Edit/delete wait for OMP cancellation confirmation; Stop restores still-pending text when supported. Already-delivered steering cannot be recalled. Queue display needs OMP's `queuedMessages` / `queue_update` support (18.4.4+); promoting follow-ups requires `promote_queued_message`, and edit/delete require `remove_queued_message`. Unsupported actions report their limitation rather than duplicate a message.
 
 ### Folders, workspace choices, and recent models

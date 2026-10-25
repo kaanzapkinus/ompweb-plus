@@ -46,8 +46,13 @@ beforeEach(() => {
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
 });
 
-afterEach(() => {
-  cleanup();
+async function cleanupComposer() {
+  // Dialog unmount queues focus cleanup; settle it while browser globals still exist.
+  await act(async () => { cleanup(); });
+}
+
+afterEach(async () => {
+  await cleanupComposer();
   globalThis.fetch = previousFetch;
   delete window.matchMedia;
 });
@@ -648,7 +653,7 @@ test("an old new-chat POST cannot promote its session after navigation unmounts 
   const dialog = await openSchedule(user);
   await user.type(within(dialog).getByRole("textbox", { name: "Prompt" }), "Save without stealing navigation");
   await user.click(within(dialog).getByRole("button", { name: "Schedule", exact: true }));
-  view.unmount();
+  await act(async () => { view.unmount(); });
   selected = "chat-b";
   render(React.createElement("div", null, "Chat B draft"));
   await act(async () => { release(); await response; });
@@ -667,7 +672,7 @@ test("schedule text, model and timing survive closing and a fresh mount without 
   await user.click(within(dialog).getByRole("button", { name: "At a specific time" }));
   fireEvent.change(within(dialog).getByLabelText("Local date and time"), { target: { value: "2099-03-04T12:30" } });
   await user.click(within(within(dialog).getByRole("textbox", { name: "Prompt" }).closest("form")).getByRole("button", { name: "Close", exact: true }));
-  cleanup();
+  await cleanupComposer();
   await mount({ models: models.filter(({ id }) => id !== "other") });
   dialog = await openSchedule(user);
   assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "Durable schedule only");
@@ -675,7 +680,7 @@ test("schedule text, model and timing survive closing and a fresh mount without 
   assert.equal(within(dialog).getByLabelText("Local date and time").value, "2099-03-04T12:30");
   assert.equal(within(dialog).getByRole("button", { name: "Schedule", exact: true }).disabled, true);
   await user.clear(within(dialog).getByRole("textbox", { name: "Prompt" }));
-  cleanup();
+  await cleanupComposer();
   await mount();
   dialog = await openSchedule(user);
   assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "", "an explicitly deleted draft must not reappear");
@@ -713,14 +718,14 @@ test("an ambiguous POST survives reload with the identical request and only conf
   await user.click(within(dialog).getByRole("button", { name: "Schedule", exact: true }));
   await waitFor(() => assert.match(within(dialog).getByRole("alert").textContent, /Response lost/));
   const original = first.requests.find(({ method }) => method === "POST").body;
-  cleanup();
+  await cleanupComposer();
   const second = await mount({ currentModel: null, models: [] });
   dialog = await openSchedule(user);
   assert.equal(within(dialog).getByRole("button", { name: "Schedule", exact: true }).disabled, false, "reconciliation does not require the model to remain available");
   await user.click(within(dialog).getByRole("button", { name: "Schedule", exact: true }));
   await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
   assert.deepEqual(second.requests.find(({ method }) => method === "POST").body, original);
-  cleanup();
+  await cleanupComposer();
   await mount();
   dialog = await openSchedule(user);
   assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "");
@@ -738,7 +743,7 @@ test("manual resume edits never replace an unsubmitted schedule draft", async ()
   fireEvent.change(within(dialog).getByLabelText("Local date and time"), { target: { value: "2099-05-06T12:00" } });
   await user.click(within(dialog).getByRole("button", { name: "Set resume time", exact: true }));
   await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
-  cleanup();
+  await cleanupComposer();
   await mount();
   dialog = await openSchedule(user);
   assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "Keep my new schedule");
@@ -760,7 +765,7 @@ test("an expired quota POST still reconciles identically after a fresh mount", a
   await user.click(within(dialog).getByRole("button", { name: "Schedule", exact: true }));
   await waitFor(() => assert.match(within(dialog).getByRole("alert").textContent, /Response lost/));
   const original = first.requests.find(({ method }) => method === "POST").body;
-  cleanup();
+  await cleanupComposer();
   t.mock.method(Date, "now", () => resetAt + 1);
   const second = await mount();
   dialog = await openSchedule(user);
@@ -779,13 +784,15 @@ test("an old pending response cannot clear a newer draft after navigation and re
   let dialog = await openSchedule(user);
   await user.type(within(dialog).getByRole("textbox", { name: "Prompt" }), "Original pending intent");
   await user.click(within(dialog).getByRole("button", { name: "Schedule", exact: true }));
-  cleanup();
+  await cleanupComposer();
   await mount();
   dialog = await openSchedule(user);
   fireEvent.change(within(dialog).getByRole("textbox", { name: "Prompt" }), { target: { value: "A newer unsent schedule" } });
   await act(async () => { release(); await response; });
   assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "A newer unsent schedule");
-  cleanup();
+  assert.equal(screen.getByRole("dialog", { name: "Schedule prompt" }), dialog, "the old response cannot close the current dialog");
+  assert.equal(document.activeElement, within(dialog).getByRole("textbox", { name: "Prompt" }), "the old view cannot take focus from the newer draft");
+  await cleanupComposer();
   await mount();
   dialog = await openSchedule(user);
   assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "A newer unsent schedule");

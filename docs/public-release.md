@@ -88,6 +88,12 @@ Feature availability follows the separately installed OMP runtime, not this web 
 - Native skills/plugins use the selected workspace and runtime. Managed/plugin-provided entries may be read-only. Installation may require network access and executing third-party tooling; review the source and requested operation first.
 - Quota reports/reset scope, model access, reasoning options, provider pricing, and transcription models depend on your own authenticated OMP installation. No model catalog entry guarantees a free tier, subscription entitlement, or continued endpoint availability.
 
+## File observation
+
+Saved-chat updates from external OMP processes use a shared native session-tree watcher. Because native watcher registration can return before event delivery is armed, startup compares file metadata once per second until the current native handle delivers its first event, then performs a final reconciliation and stops sampling. An initially idle tree can remain in this metadata-only startup phase until its first native event. No probe files are written and transcript contents are not polled.
+
+Detected changes retain the existing debounce and targeted cache invalidation. The last subscriber releases the native handle and outstanding startup, debounce, and retry work. Native watch errors keep read-only startup coverage while registration is retried; this is not a guarantee against every operating-system event loss or inaccessible filesystem.
+
 ## Dependency advisories
 
 The publication-time `npm audit --omit=dev` reports 22 production dependency findings: 5 low, 6 moderate, 6 high, and 5 critical. The counts describe affected dependency records, not a verified number of independently exploitable application vulnerabilities, and the registry's advisory data can change.
