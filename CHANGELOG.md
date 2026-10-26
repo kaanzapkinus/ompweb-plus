@@ -11,6 +11,7 @@ This file records OMPWeb Plus changes above its integrated upstream baseline and
 - Replace the topic-folder layer with selectable logical workspaces shared by the sidebar and new-chat picker. Preserve every existing conversation's native working directory and transcript; migrate legacy memberships without deleting chats.
 - Keep same-directory workspace identities, drafts, native/scheduled creation, forks, and navigation distinct. Support chat moves and workspace removal without deleting conversations; retire empty source-directory rows after consolidation.
 - Preserve explicit main/linked Git checkout selection separately from logical membership, and retain filesystem roots as valid execution directories.
+- Resolve logical workspace paths through the OS-native resolver so Windows short-name aliases and Git checkout identities agree.
 - Load and subscribe to newly scheduled conversations immediately, without requiring a page reload; keep normal in-flight chat promotion on its existing runtime.
 - Collapse scheduled-job details into a compact status row; manage, edit, cancel, and dismiss terminal jobs without obscuring the conversation.
 - Use the normal composer for scheduled prompts, including slash discovery, model-specific reasoning/Fast/Slow choices, tool presets, advisor, attachments, and automatic text growth. Discovery does not create a conversation and has a bounded child-process lifetime.

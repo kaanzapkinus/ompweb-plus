@@ -76,7 +76,7 @@ export function saveWorkspacesRegistry(registry: WorkspacesRegistry): void {
   }
 }
 function canonicalCwd(cwd: string): string {
-  try { return realpathSync(validateProjectPath(cwd)); }
+  try { return realpathSync.native(validateProjectPath(cwd)); }
   catch (error) {
     if (error instanceof ProjectPathError) throw new WorkspacesError(error.message);
     throw error;
