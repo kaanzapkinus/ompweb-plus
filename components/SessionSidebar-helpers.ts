@@ -72,13 +72,13 @@ function saveUnreadSessionIds(ids: Set<string>): void {
     // ignore storage quota / privacy-mode errors
   }
 }
-const EXPANDED_PROJECTS_STORAGE_KEY = "omp-web:expanded-projects";
+const EXPANDED_PROJECTS_STORAGE_KEY = "omp-web:expanded-workspaces";
 
 /** Shared empty set for the no-stored-expansion default (never mutated). */
 const EMPTY_PROJECT_SET: ReadonlySet<string> = new Set();
 
-/** Persisted expanded-project paths. Returns null when nothing was stored —
- *  the sidebar then defaults to expanding only the active project. */
+/** Persisted logical workspace IDs. Returns null when nothing was stored —
+ *  the sidebar then defaults to expanding only the active workspace. */
 function loadExpandedProjects(): Set<string> | null {
   if (typeof window === "undefined") return null;
   try {
@@ -86,7 +86,7 @@ function loadExpandedProjects(): Set<string> | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed)) {
-      return new Set(parsed.filter((path): path is string => typeof path === "string" && path.length > 0).map((path) => comparableProjectPath(path)));
+      return new Set(parsed.filter((id): id is string => typeof id === "string" && id.length > 0));
     }
     return null;
   } catch {
@@ -175,13 +175,11 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
   sort(roots);
   return roots;
 }
-const MAX_PROJECT_SESSIONS = 5;
 export {
   EMPTY_PROJECT_SET,
   EXPANDED_PROJECTS_STORAGE_KEY,
   INITIAL_RESTORE_MAX_ATTEMPTS,
   INITIAL_RESTORE_RETRY_MS,
-  MAX_PROJECT_SESSIONS,
   UNREAD_SESSIONS_STORAGE_KEY,
   buildSessionTree,
   displayCwd,

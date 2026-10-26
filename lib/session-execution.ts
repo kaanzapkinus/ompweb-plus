@@ -24,6 +24,7 @@ export interface StoredExecutionJob extends ExecutionJob {
 export interface ScheduledChatDraft extends ExecutionPromptPayload {
   cwd: string;
   requestId: string;
+  workspaceId?: string;
 }
 export interface ScheduledChatCreation {
   draft: ScheduledChatDraft;
@@ -74,6 +75,7 @@ function load(): Store {
   if (!value.creations || typeof value.creations !== "object" || Array.isArray(value.creations)
     || Object.entries(value.creations).some(([requestId, creation]) => !creation || !creation.draft || creation.draft.requestId !== requestId
       || typeof creation.draft.cwd !== "string" || typeof creation.draft.prompt !== "string" || typeof creation.draft.provider !== "string" || typeof creation.draft.modelId !== "string" || !Number.isFinite(creation.draft.runAt)
+      || (creation.draft.workspaceId !== undefined && (typeof creation.draft.workspaceId !== "string" || !creation.draft.workspaceId.trim()))
       || promptOptionsError(creation.draft)
       || !["reserved", "creating", "created"].includes(creation.phase)
       || (creation.phase === "created" && (typeof creation.sessionId !== "string" || !creation.sessionId || typeof creation.sessionFile !== "string" || !creation.sessionFile)))) {
@@ -248,11 +250,11 @@ function sameScheduledPrompt(left: ExecutionPromptPayload | StoredExecutionJob, 
 
 /** Persist intent before crossing the native creation boundary. */
 export function reserveScheduledChatRequest(draft: ScheduledChatDraft): ScheduledChatCreation {
-  draft = { ...executionPromptPayload(draft), cwd: draft.cwd, requestId: draft.requestId };
+  draft = { ...executionPromptPayload(draft), cwd: draft.cwd, requestId: draft.requestId, ...(draft.workspaceId !== undefined ? { workspaceId: draft.workspaceId } : {}) };
   return change((store, dirty) => {
     const previous = store.creations[draft.requestId];
     if (previous) {
-      if (previous.draft.cwd !== draft.cwd || !sameScheduledPrompt(previous.draft, draft)) throw new ExecutionError("Request ID belongs to a different scheduled prompt or workspace", 409);
+      if (previous.draft.cwd !== draft.cwd || previous.draft.workspaceId !== draft.workspaceId || !sameScheduledPrompt(previous.draft, draft)) throw new ExecutionError("Request ID belongs to a different scheduled prompt or workspace", 409);
       return { ...previous, draft: { ...previous.draft } };
     }
     if (!Number.isFinite(draft.runAt) || draft.runAt <= Date.now()) throw new ExecutionError("Choose a future execution time");
@@ -261,6 +263,11 @@ export function reserveScheduledChatRequest(draft: ScheduledChatDraft): Schedule
     dirty();
     return { ...creation, draft: { ...draft } };
   });
+}
+
+export function findScheduledChatCreation(requestId: string): ScheduledChatCreation | undefined {
+  const creation = load().creations[requestId];
+  return creation ? { ...creation, draft: { ...creation.draft } } : undefined;
 }
 
 export function beginScheduledChatCreation(requestId: string): void {

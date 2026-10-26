@@ -7,10 +7,11 @@ import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
 import { runUtilityCommand } from "@/lib/omp/rpc-utility";
 import { invalidateSessionListCache, listAllSessions, readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
-import { beginScheduledChatCreation, createExecutionJob, executionPromptPayload, ExecutionError, findExecutionRequest, getExecutionResponseSnapshot, recordScheduledChatSession, reserveScheduledChatRequest, type ScheduledChatCreation, type ScheduledChatDraft } from "@/lib/session-execution";
+import { beginScheduledChatCreation, createExecutionJob, executionPromptPayload, ExecutionError, findExecutionRequest, findScheduledChatCreation, getExecutionResponseSnapshot, recordScheduledChatSession, reserveScheduledChatRequest, type ScheduledChatCreation, type ScheduledChatDraft } from "@/lib/session-execution";
 import { getAgentDir } from "@/lib/omp/paths";
 import type { ExecutionSnapshot } from "@/lib/session-execution-types";
 import type { SessionInfo } from "@/lib/types";
+import { assignSessionToWorkspace, workspaceCreationCwd, WorkspacesError } from "@/lib/workspaces";
 
 export const dynamic = "force-dynamic";
 type Draft = ScheduledChatDraft;
@@ -68,6 +69,7 @@ async function create(draft: Draft, creation: Creation, journal: ScheduledChatCr
     // Naming a resumed native file can itself trigger an ownership move.
     // Reconcile that supported state boundary before attaching the job.
     await session.send({ type: "get_state" });
+    if (draft.workspaceId !== undefined) await assignSessionToWorkspace(session.sessionId, draft.workspaceId);
     allowFileRoot(draft.cwd);
     createExecutionJob(session.sessionId, draft);
     return await responseFor(session.sessionId);
@@ -97,9 +99,12 @@ export async function POST(req: Request) {
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new ExecutionError("Expected an object");
     if (typeof body.cwd !== "string" || !body.cwd || !existsSync(body.cwd) || !statSync(body.cwd).isDirectory()) throw new ExecutionError("Choose an existing workspace directory");
     if (typeof body.requestId !== "string" || !/^[a-f0-9]{32}$/.test(body.requestId)) throw new ExecutionError("A valid schedule request ID is required");
-    const draft: Draft = { ...executionPromptPayload(body as Draft), cwd: realpathSync(body.cwd), requestId: body.requestId };
+    if (body.workspaceId !== undefined && (typeof body.workspaceId !== "string" || !body.workspaceId.trim())) throw new ExecutionError("Invalid workspaceId");
+    const draft: Draft = { ...executionPromptPayload(body as Draft), cwd: realpathSync(body.cwd), requestId: body.requestId, ...(body.workspaceId !== undefined ? { workspaceId: body.workspaceId } : {}) };
     const previous = findExecutionRequest(draft.requestId);
     if (previous) {
+      const accepted = findScheduledChatCreation(draft.requestId);
+      if (accepted && accepted.draft.workspaceId !== draft.workspaceId) throw new ExecutionError("Request ID belongs to another workspace", 409);
       const file = await resolveSessionPath(previous.sessionId);
       const header = file ? readSessionHeader(file) : null;
       if (!header || realpathSync(header.cwd) !== draft.cwd) throw new ExecutionError("Request ID belongs to another workspace", 409);
@@ -108,6 +113,7 @@ export async function POST(req: Request) {
       createExecutionJob(previous.sessionId, draft);
       return NextResponse.json(await responseFor(previous.sessionId));
     }
+    draft.cwd = await workspaceCreationCwd(draft.cwd, draft.workspaceId);
     const journal = reserveScheduledChatRequest(draft);
     const key = `${getAgentDir()}:${draft.requestId}`;
     let creation = creations.get(key);
@@ -127,6 +133,6 @@ export async function POST(req: Request) {
     return NextResponse.json({
       error: error instanceof Error ? error.message : String(error),
       ...(error instanceof WebRpcError || error instanceof RpcCommandError ? { code: error.code ?? "rpc_command_failed" } : {}),
-    }, { status: error instanceof ExecutionError ? error.status : error instanceof RequestBodyTooLargeError ? 413 : error instanceof SyntaxError || error instanceof WebRpcError || error instanceof RpcCommandError ? 400 : 500 });
+    }, { status: error instanceof ExecutionError || error instanceof WorkspacesError ? error.status : error instanceof RequestBodyTooLargeError ? 413 : error instanceof SyntaxError || error instanceof WebRpcError || error instanceof RpcCommandError ? 400 : 500 });
   }
 }

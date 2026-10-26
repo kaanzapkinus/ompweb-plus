@@ -50,6 +50,7 @@ type ScheduleModel = { provider: string; id: string; name?: string; supportsFast
 type SessionExecutionControlsProps = {
   sessionId?: string;
   newSessionCwd?: string | null;
+  newSessionWorkspaceId?: string | null;
   onSessionCreated?: (session: SessionInfo) => void;
   currentModel?: ExecutionModel | null;
   models?: readonly ScheduleModel[];
@@ -74,7 +75,7 @@ function formatDelay(totalMinutes: number): string {
   return `${minutes}m`;
 }
 
-export function SessionExecutionControls({ sessionId, newSessionCwd, onSessionCreated, currentModel, models = EMPTY_MODELS, modelsLoading = false, composerProps, thinkingLevelsByModel, thinkingMapsByModel, onStop, scheduleOpen, onScheduleOpenChange, onScheduleAvailabilityChange, scheduleReturnFocus, policyContainer }: SessionExecutionControlsProps) {
+export function SessionExecutionControls({ sessionId, newSessionCwd, newSessionWorkspaceId, onSessionCreated, currentModel, models = EMPTY_MODELS, modelsLoading = false, composerProps, thinkingLevelsByModel, thinkingMapsByModel, onStop, scheduleOpen, onScheduleOpenChange, onScheduleAvailabilityChange, scheduleReturnFocus, policyContainer }: SessionExecutionControlsProps) {
   const { locale } = useI18n();
   const copy = COPY.en;
   const [snapshot, setSnapshot] = useState<ExecutionSnapshot | null>(null);
@@ -97,7 +98,7 @@ export function SessionExecutionControls({ sessionId, newSessionCwd, onSessionCr
   const [scheduleCommands, setScheduleCommands] = useState<ChatInputProps["slashCommands"]>();
   const [commandsLoading, setCommandsLoading] = useState(false);
   const open = scheduleOpen || manualJob !== null || editingJob !== null;
-  const draftKey = scheduleDraftKey(sessionId, newSessionCwd);
+  const draftKey = scheduleDraftKey(sessionId, newSessionCwd, newSessionWorkspaceId);
   const currentModelRef = useRef(currentModel);
   currentModelRef.current = currentModel;
   const composerPropsRef = useRef(composerProps);
@@ -210,7 +211,7 @@ export function SessionExecutionControls({ sessionId, newSessionCwd, onSessionCr
       const response = await fetch(endpoint + query, {
         method,
         headers: body ? { "Content-Type": "application/json" } : undefined,
-        body: body ? JSON.stringify(!sessionId && method === "POST" ? { ...body, cwd: newSessionCwd } : body) : undefined,
+        body: body ? JSON.stringify(!sessionId && method === "POST" ? { ...body, cwd: newSessionCwd, ...(newSessionWorkspaceId ? { workspaceId: newSessionWorkspaceId } : {}) } : body) : undefined,
         signal: controller.signal,
         cache: "no-store",
       });
@@ -220,7 +221,7 @@ export function SessionExecutionControls({ sessionId, newSessionCwd, onSessionCr
     } finally {
       clearTimeout(timer);
     }
-  }, [endpoint, sessionId, newSessionCwd]);
+  }, [endpoint, sessionId, newSessionCwd, newSessionWorkspaceId]);
 
   const refresh = useCallback(async () => {
     if (pending.current || !sessionId) return;

@@ -8,8 +8,12 @@ import { WebRpcError, startRpcSession } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
+import { assignSessionToWorkspace, workspaceCreationCwd, WorkspacesError } from "@/lib/workspaces";
 
 function newSessionErrorResponse(error: unknown) {
+  if (error instanceof WorkspacesError) {
+    return NextResponse.json({ error: error.message }, { status: error.status });
+  }
   if (error instanceof RequestBodyTooLargeError) {
     return NextResponse.json({ error: "New session request is too large", code: "request_too_large" }, { status: 413 });
   }
@@ -34,7 +38,8 @@ function newSessionErrorResponse(error: unknown) {
 export async function POST(req: Request) {
   try {
     const body = await parseJsonWithinLimit<{ cwd?: string; [key: string]: unknown }>(req, MAX_AGENT_COMMAND_REQUEST_BYTES);
-    const { cwd, ...command } = body;
+    const { cwd: requestedCwd, workspaceId, ...command } = body;
+    const cwd = await workspaceCreationCwd(requestedCwd as string, workspaceId as string | undefined);
 
     if (!cwd || typeof cwd !== "string") {
       return NextResponse.json({ error: "cwd is required", code: "cwd_required" }, { status: 400 });
@@ -65,6 +70,15 @@ export async function POST(req: Request) {
     invalidateSessionListCache();
 
     try {
+      // An empty native runtime can have an ID before its transcript exists.
+      // Persist it through native RPC, never a synthetic JSONL/header write.
+      if (workspaceId !== undefined) {
+        if (!session.sessionFile || !existsSync(session.sessionFile)) {
+          const result = await session.send({ type: "new_session" }) as { cancelled?: boolean };
+          if (result.cancelled) throw new WorkspacesError("Native session creation was cancelled", 409);
+        }
+        await assignSessionToWorkspace(session.sessionId, workspaceId as string);
+      }
       // Apply pre-selected model before sending the prompt
       if (provider && modelId) {
         await session.send({ type: "set_model", provider, modelId });
@@ -76,12 +90,12 @@ export async function POST(req: Request) {
       }
 
       if (promptCommand.type === "ensure_session") {
-        return NextResponse.json({ success: true, sessionId: realSessionId, data: null });
+        return NextResponse.json({ success: true, sessionId: session.sessionId || realSessionId, data: null });
       }
 
       const result = await session.send(promptCommand);
 
-      return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
+      return NextResponse.json({ success: true, sessionId: session.sessionId || realSessionId, data: result });
     } catch (error) {
       // The child was spawned but the prompt never ran: without this cleanup a
       // failed set_model/set_thinking_level/prompt leaves an orphaned omp

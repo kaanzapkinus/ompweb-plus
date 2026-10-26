@@ -2404,6 +2404,25 @@ test("an abandoned new-chat send delivers its prompt without promoting or attach
   assert.ok(world.calls.some((call) => call.url.startsWith("/api/agent/created") && call.body?.message === "deliver after navigation"));
 });
 
+test("fresh same-cwd workspaces create separate native runtimes with explicit membership", async () => {
+  resetWorld();
+  for (const workspaceId of ["companion", "other"]) {
+    const nativeId = `created-${workspaceId}`;
+    world.holds.push({
+      match: (method, url) => method === "POST" && url === "/api/agent/new",
+      produce: async () => ({ value: { sessionId: nativeId } }),
+    });
+    const w = await mountSession(null, undefined, { newSessionCwd: "/workspace", newSessionWorkspaceId: workspaceId });
+    await act(async () => { await w.latest.loadSlashCommands(); });
+    assert.deepEqual(lastEs()?.channel, { kind: "session", sessionId: nativeId });
+    w.unmount();
+  }
+  assert.deepEqual(callsTo("POST", "/api/agent/new").map(({ body }) => ({ type: body.type, cwd: body.cwd, workspaceId: body.workspaceId })), [
+    { type: "ensure_session", cwd: "/workspace", workspaceId: "companion" },
+    { type: "ensure_session", cwd: "/workspace", workspaceId: "other" },
+  ]);
+});
+
 test("a /btw that starts a fresh chat promotes it once omp accepts the question", async () => {
   resetWorld();
   world.holds.push({

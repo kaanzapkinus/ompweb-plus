@@ -5,16 +5,18 @@
  * API: the app replaces (never pushes) `?session=` URLs, and the mobile
  * back-gesture machinery (`useSidebarHistory` + the popstate bridge) already
  * owns the real history stack. Entries are the main chat views only — a
- * session, or the new-chat composer for a cwd. In-session branches have their
+ * session, or the new-chat composer for a logical workspace and cwd. In-session branches have their
  * own navigator (BranchNavigator) and never appear here.
  */
 
-/** One visited view: a session (by id), or the new-chat composer for a cwd. */
+/** One visited view: a session (by id), or a fresh workspace composer. */
 export interface NavigationEntry {
   /** Session id, or null for the new-chat (composer) view. */
   sessionId: string | null;
   /** The view's cwd — the session's cwd, or the new-chat cwd. */
   cwd: string | null;
+  /** Logical membership for a fresh chat; distinct workspaces may share cwd. */
+  workspaceId?: string | null;
 }
 
 export interface NavigationHistory {
@@ -35,12 +37,12 @@ export function createNavigationHistory(): NavigationHistory {
 
 /**
  * Session views compare by id (a session keeps its identity while its cwd
- * metadata refreshes); new-chat views compare by cwd.
+ * metadata refreshes); new-chat views compare by workspace identity and cwd.
  */
 export function navigationEntriesEqual(a: NavigationEntry, b: NavigationEntry): boolean {
   if (a.sessionId !== b.sessionId) return false;
   if (a.sessionId !== null) return true;
-  return (a.cwd ?? null) === (b.cwd ?? null);
+  return (a.cwd ?? null) === (b.cwd ?? null) && (a.workspaceId ?? null) === (b.workspaceId ?? null);
 }
 
 export function currentNavigationEntry(history: NavigationHistory): NavigationEntry | null {

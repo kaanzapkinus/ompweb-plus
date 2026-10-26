@@ -89,11 +89,11 @@ The fork retains the upstream browser/OMP architecture and adds the mobile, orga
 - External OMP session-file changes refresh saved-chat views. Watcher startup stays read-only and reconciles metadata until the native watcher begins delivering events; it does not write probe files or poll transcript contents.
 - Native queues are shared across devices. Edit/delete wait for OMP cancellation confirmation; Stop restores still-pending text when supported. Already-delivered steering cannot be recalled. Queue display needs OMP's `queuedMessages` / `queue_update` support (18.4.4+); promoting follow-ups requires `promote_queued_message`, and edit/delete require `remove_queued_message`. Unsupported actions report their limitation rather than duplicate a message.
 
-### Folders, workspace choices, and recent models
+### Logical workspaces and recent models
 
-- Create, rename, move, and delete topic folders as **metadata only**. They never move transcript files or change a conversation's working directory. Each fork has its own assignment; ancestry remains navigable across folders. Deleting a folder leaves its chats unassigned, not deleted.
-- Topic folders appear directly in the sidebar without an extra workspace wrapper. Source-workspace actions remain accessible, unassigned chats remain visible, and grouping uses complete conversation trees before display limits. Duplicate-ID transcript files remain visible.
-- Sidebar and new-chat workspace selection share category ordering and aliases. Searching or showing only running chats does not shrink new-chat choices. Real conversations in temporary directories remain ordinary workspaces; only empty temporary fixtures are consolidated into the read-only temporary group.
+- Create, rename, and remove logical workspaces, and move chats between them as **metadata only**. Membership never changes an existing conversation's working directory or transcript. Removing a workspace returns its chats to directory-based workspaces; it never deletes conversations.
+- The sidebar and new-chat picker use the same workspace records. Workspaces have independent IDs and a default directory, so two topics can share a directory without sharing selection, drafts, or new-chat membership. Normal and scheduled new chats retain the selected workspace; genuine Git checkout selection remains available separately.
+- Existing topic-folder metadata migrates once into agent-root `workspaces.json`, retaining the old registry for rollback. Same-name folders merge, inherited memberships become explicit, and unassigned external conversations remain visible. Forks inherit membership initially and can be moved independently; ancestry remains navigable across workspaces. Search/running filters never shrink new-chat choices.
 - An independent **Recent models** column remains visible on phones and desktop during provider drilldown and full-catalog search. Provider labels distinguish equal model names. Recents are saved on the server and shared between browsers; local cache is supplementary. Explicit hidden-model choices survive catalog refreshes.
 
 ### Metrics and earlier history

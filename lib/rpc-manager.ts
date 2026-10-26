@@ -27,6 +27,7 @@ import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./
 import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import { cancelAutomaticResumes, executionSpawnArgs, executionWaitEnabled, getExecutionSnapshot, hasRunningExecution, moveSessionExecution, recordExecutionControlResult, recordExecutionEvent } from "./session-execution";
+import { inheritSessionWorkspace, moveSessionWorkspace } from "./workspaces";
 import type {
   BashResultInfo,
   OmpModel,
@@ -620,7 +621,10 @@ export class AgentSessionWrapper {
     // Commit all durable owners before publishing the new native identity.
     // Terminal/quota frames on either side of this synchronous boundary then
     // find the same job and its buffered message_end receipt.
-    if (moved && oldId !== state.sessionId) moveSessionExecution(oldId, state.sessionId, state.sessionFile);
+    if (moved && oldId !== state.sessionId) {
+      moveSessionWorkspace(oldId, state.sessionId);
+      moveSessionExecution(oldId, state.sessionId, state.sessionFile);
+    }
     if (identityChanged && !moved) {
       this.resetStream();
       this.promptRunning = false;
@@ -1790,7 +1794,9 @@ export class AgentSessionWrapper {
             entryId: command.entryId as string,
           });
           if (result.cancelled) return { cancelled: true };
+          const parentSessionId = this._sessionId;
           const newSessionId = await this.refreshIdentityAfterSessionChange();
+          await inheritSessionWorkspace(parentSessionId, newSessionId);
           // `text` is the branched prompt omp hands back for edit-and-resend.
           return { cancelled: false, newSessionId, text: result.text };
         } finally { this.sessionChangeInFlight = false; }

@@ -479,18 +479,19 @@ export interface ProjectLaunchConfig {
 }
 
 
-export interface SessionFolder {
+/** Logical membership is independent of the native execution directory. */
+export interface Workspace {
   id: string;
   name: string;
-  projectPath: string;
+  cwd: string;
   createdAt: string;
-  order?: number;
+  order: number;
 }
 
-export interface SessionFoldersRegistry {
+export interface WorkspacesRegistry {
   version: 1;
-  folders: SessionFolder[];
-  assignments: Record<string, string>; // sessionId -> folderId
+  workspaces: Workspace[];
+  assignments: Record<string, string>; // native sessionId -> workspaceId
 }
 
 /** A project in the sidebar: an explicitly added directory (registered in the

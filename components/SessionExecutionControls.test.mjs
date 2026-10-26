@@ -494,6 +494,7 @@ test("new chat scheduling posts to the dedicated schedule endpoint and promotes 
     render(React.createElement(ScheduleComposer, {
       sessionId: undefined,
       newSessionCwd: "/tmp/workspace",
+      newSessionWorkspaceId: "companion",
       onSessionCreated: (s) => { promotedSession = s; },
       currentModel,
       models,
@@ -507,6 +508,7 @@ test("new chat scheduling posts to the dedicated schedule endpoint and promotes 
   const post = requests.find(({ method }) => method === "POST");
   assert.equal(post.url, "/api/sessions/schedule");
   assert.equal(post.body.cwd, "/tmp/workspace");
+  assert.equal(post.body.workspaceId, "companion");
   assert.equal(post.body.prompt, "Run later from new chat");
   assert.equal(post.body.provider, "alpha");
   assert.equal(post.body.modelId, "shared:model");
@@ -715,6 +717,23 @@ test("schedule drafts stay scoped across chats and new workspaces even while the
   Object.assign(props, { sessionId: undefined, newSessionCwd: "/tmp/one" });
   await act(async () => view.rerender(React.createElement(ScheduleComposer, props)));
   assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "/tmp/one");
+});
+
+test("switching same-cwd workspace isolates schedule drafts and restores the chosen workspace draft", async () => {
+  const user = userEvent.setup();
+  globalThis.fetch = async () => Response.json({ policy: { mode: "fallback" }, jobs: [], reports: [] });
+  const props = { currentModel, models, newSessionCwd: "/same", newSessionWorkspaceId: "companion" };
+  const view = render(React.createElement(ScheduleComposer, props));
+  let dialog = await openSchedule(user);
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Prompt" }), { target: { value: "Companion schedule" } });
+  props.newSessionWorkspaceId = "other";
+  await act(async () => view.rerender(React.createElement(ScheduleComposer, props)));
+  dialog = screen.getByRole("dialog", { name: "Schedule prompt" });
+  assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "");
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Prompt" }), { target: { value: "Other schedule" } });
+  props.newSessionWorkspaceId = "companion";
+  await act(async () => view.rerender(React.createElement(ScheduleComposer, props)));
+  assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "Companion schedule");
 });
 
 test("an ambiguous POST survives reload with the identical request and only confirmed success clears it", async () => {

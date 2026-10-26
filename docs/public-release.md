@@ -21,7 +21,7 @@ The following distinguishes inherited foundations from the fork's integrated enh
 | Remote access and QR pairing | Integrated enhancements: direct-loopback authority verified from actual socket evidence; expiring single-use QR links, durable device/revocation state, presence, explicit quick-tunnel/manual-public-URL controls, and fail-closed authority storage. |
 | Document attachments | Fork enhancement: up to 10 files × 10 MiB; unchanged bytes saved in the selected workspace without overwriting existing files; prompts contain exact paths and full-file inspection instructions, not extracted/truncated text. |
 | Image attachments | Fork transport enhancement: 10 images × 10 MiB, at most 100 MiB decoded aggregate; 135 MiB command JSON and 145 MiB proxy ceilings. Provider/proxy limits can be stricter. |
-| Topic folders and workspace choices | Fork enhancement: metadata-only create/rename/move/delete, independently assigned forks, preserved ancestry, full-tree grouping, duplicate-ID visibility, direct sidebar folders, accessible source-workspace actions, consistent new-chat/sidebar categories and aliases. Real temporary-directory conversations are preserved. |
+| Logical workspaces | Fork enhancement: metadata-only create/rename/remove and chat membership, shared sidebar/new-chat records, independent IDs for same-directory topics, preserved native cwd and ancestry, and selected membership for normal/scheduled creation and forks. Legacy folders migrate once; external unassigned conversations remain visible in directory-based defaults. |
 | Recent models | Fork enhancement: server-backed cross-browser recents and an independent provider-labelled column on phone/desktop; retained during provider drilldown/search, with explicit hidden-model preferences preserved. |
 | Metrics and history | Fork enhancement: live/average TPS, two-decimal estimated USD cost and context gauge in the chat strip; cache details on demand; unknown/zero distinction and full-branch totals before compaction/pagination. Existing earlier-history control loads pre-compaction pages read-only without resetting live work. |
 | Per-chat quota behavior | Fork enhancement: composer **+** chooses fallback or same-model wait using a session-process policy overlay, not global configuration mutation. Manual timing/cancellation remains authoritative. |
@@ -39,7 +39,7 @@ Default paths below describe generic OMP locations, not files shipped by this re
 | Data | Where it lives | Shared between devices? |
 | --- | --- | --- |
 | Transcript files and native configuration/authentication | Your OMP agent directory and native stores | Browsers on this server see the same permitted sessions; credentials are not exported to browser drafts |
-| Topic folders | Agent-root `session-folders.json` | Yes, through the server |
+| Logical workspaces and chat memberships | Agent-root `workspaces.json`; legacy `session-folders.json` retained only as migration/rollback data | Yes, through the server; existing chat working directories remain unchanged |
 | Model recents | Agent-root `recent-models.json`, plus browser cache | Yes, server-backed; the local cache alone is not authoritative |
 | Execution policies, jobs, request receipts | Agent-root `web-session-execution.json` and associated durable metadata | Yes, through the server |
 | Pairing tokens, devices, presence, revocations | Server-side pairing authority store | Yes, as authority; do not copy it between unrelated installations |

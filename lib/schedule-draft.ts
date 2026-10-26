@@ -43,9 +43,9 @@ function browserStorage(): StorageLike | null {
   try { return window.localStorage; } catch { return null; }
 }
 
-export function scheduleDraftKey(sessionId?: string, cwd?: string | null): string | null {
+export function scheduleDraftKey(sessionId?: string, cwd?: string | null, workspaceId?: string | null): string | null {
   return sessionId ? `omp-web:schedule-draft:${JSON.stringify(["session", sessionId])}`
-    : cwd ? `omp-web:schedule-draft:${JSON.stringify(["workspace", cwd])}` : null;
+    : cwd ? `omp-web:schedule-draft:${JSON.stringify(workspaceId ? ["workspace", workspaceId, cwd] : ["workspace", cwd])}` : null;
 }
 
 export function emptyScheduleDraft(model: ExecutionModel | null): ScheduleDraft {

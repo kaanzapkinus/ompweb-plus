@@ -20,6 +20,7 @@ import { BtwHistoryDialog, type BtwPanelProps } from "./BtwPanel";
 import OmpWebLogo from "./OmpWebLogo";
 import { CHAT_COLUMN_MAX_WIDTH, MINIMAP_WIDTH } from "@/lib/chat-layout";
 import { WorkspaceState } from "./AppShell-layout";
+import { newWorkspaceDraftKey } from "@/lib/workspace-view";
 import { useAgentSession, type AgentPhase, type NoticeItem, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useSpeechSynthesis, SpeechSynthesisProvider } from "@/hooks/useSpeechSynthesis";
@@ -46,6 +47,7 @@ import { getDraftSummary } from "@/lib/draft-store";
 interface Props {
   session: SessionInfo | null;
   newSessionCwd: string | null;
+  newSessionWorkspaceId?: string | null;
   newSessionWorkspace?: ReactNode;
   toolCallsDefaultCollapsed?: boolean;
   /** UI `hideToolActivity`: fold a running turn's tool calls into one row. */
@@ -56,6 +58,8 @@ interface Props {
   hideThinkingBlock?: boolean;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
+  /** Scheduling creates a persisted conversation outside this hook's runtime. */
+  onScheduledSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
@@ -566,7 +570,7 @@ export function useGenerationSpeed({ tokensPerSecond, agentRunning, sessionBusy,
   } : null, [agentRunning, generationSpeed]);
 }
 
-export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onOpenFile, onOpenUrl, onOpenProviders }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionWorkspaceId, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onScheduledSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onOpenFile, onOpenUrl, onOpenProviders }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -623,7 +627,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     handleToolPresetChange,
     btw, askBtw,
   } = useAgentSession({
-    session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
+    session, newSessionCwd, newSessionWorkspaceId, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenUrl,
   });
@@ -657,7 +661,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   }, [onProviderUsageContextChange, providerUsageContext]);
   const generationSpeed = useGenerationSpeed({
     tokensPerSecond, agentRunning, sessionBusy, messages,
-    sessionKey: session?.id ?? newSessionCwd ?? null,
+    sessionKey: session?.id ?? newWorkspaceDraftKey(newSessionCwd, newSessionWorkspaceId) ?? null,
   });
   const sessionMetrics = useMemo(() => buildSessionMetrics({
     stats: sessionStats,
@@ -701,7 +705,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   // top, load another page while keeping the scroll position stable.
   const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
   const prevSessionKeyForPagingRef = useRef<string | null>(null);
-  const sessionKeyForPaging = session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : "empty");
+  const sessionKeyForPaging = session?.id ?? newWorkspaceDraftKey(newSessionCwd, newSessionWorkspaceId) ?? "empty";
   useEffect(() => {
     if (prevSessionKeyForPagingRef.current !== sessionKeyForPaging) {
       prevSessionKeyForPagingRef.current = sessionKeyForPaging;
@@ -1032,7 +1036,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   const [scheduleAvailable, setScheduleAvailable] = useState(false);
   const [executionPolicyContainer, setExecutionPolicyContainer] = useState<HTMLDivElement | null>(null);
   const scheduleReturnFocusRef = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => { setScheduleOpen(false); }, [session?.id, newSessionCwd]);
+  useEffect(() => { setScheduleOpen(false); }, [session?.id, newSessionCwd, newSessionWorkspaceId]);
   const handleSchedulePrompt = useCallback((trigger: HTMLButtonElement) => {
     if (!scheduleAvailable) return;
     scheduleReturnFocusRef.current = trigger;
@@ -1142,7 +1146,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       onLoadSlashCommands={loadSlashCommands}
       onBuiltinCommand={handleBuiltinSlashCommand}
       onAudioUnlock={unlockAudio}
-      draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
+      draftKey={session?.id ?? newWorkspaceDraftKey(newSessionCwd, newSessionWorkspaceId)}
       cwd={session?.cwd ?? newSessionCwd}
       /* The pill bar and chevron only render in the non-empty layout; don't
          accept Escape-to-minimize in the fresh-chat branch where there is
@@ -1194,10 +1198,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     >
       <SessionMetricsPanel metrics={sessionMetrics} />
       {(session?.id || newSessionCwd) && <SessionExecutionControls
-        key={session?.id ?? `new:${newSessionCwd}`}
+        key={session?.id ?? newWorkspaceDraftKey(newSessionCwd, newSessionWorkspaceId)}
         sessionId={session?.id}
         newSessionCwd={newSessionCwd}
-        onSessionCreated={onSessionCreated}
+        newSessionWorkspaceId={newSessionWorkspaceId}
+        onSessionCreated={onScheduledSessionCreated ?? onSessionCreated}
         currentModel={displayModelValue}
         models={modelList}
         modelsLoading={modelsLoading}
@@ -1448,7 +1453,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       {/* Minimized pill bar - shown when composer is collapsed */}
       {composerMinimized && (
         <MinimizedComposerBar
-          draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
+          draftKey={session?.id ?? newWorkspaceDraftKey(newSessionCwd, newSessionWorkspaceId)}
           isStreaming={sessionBusy}
           isCompacting={isCompacting}
           statusText={composerStatusText}
