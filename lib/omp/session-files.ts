@@ -253,7 +253,7 @@ function isBlobRef(data: string): boolean {
 }
 
 /** Extract the hash from a blob ref; the hash check confines reads to the blob dir. */
-function parseBlobRef(data: string): string | null {
+export function parseBlobRef(data: string): string | null {
   if (!data.startsWith(BLOB_PREFIX)) return null;
   const hash = data.slice(BLOB_PREFIX.length);
   return BLOB_HASH_RE.test(hash) ? hash : null;

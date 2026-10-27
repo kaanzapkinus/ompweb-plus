@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useDeferredValue } from "react";
+import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo } from "react";
 import type { ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo, Workspace, WorkspacesRegistry } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -12,7 +12,7 @@ import { toast } from "./ui/toast";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
 import { groupWorkspaceSessions } from "@/lib/workspace-view";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { Archive, ArrowLeft, ArrowRight, Check, ChevronRight, FileUp, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, X } from "lucide-react";
+import { Archive, ArrowLeft, ArrowRight, Check, ChevronRight, FileUp, Plus, RefreshCw, Settings2, X } from "lucide-react";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
 import { openEventStream } from "@/lib/event-stream";
 import {
@@ -32,6 +32,7 @@ import {
 import { OmpWebTitle, SIDEBAR_BUTTON_TRANSITION, SidebarIconButton } from "./SessionSidebar-chrome";
 import { WorkspaceRow } from "./SessionSidebar-rows";
 import { requestWorkspace, WorkspaceNameDialog } from "./SessionSidebar-workspaces";
+import { SessionDiscovery } from "./SessionSidebar-discovery";
 
 /** Deadline for one /api/sessions fetch. A wedged-but-listening server never
  * answers; without this the initial spinner would pend forever. */
@@ -101,6 +102,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
 
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  const [discoveryRefreshKey, setDiscoveryRefreshKey] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
@@ -131,11 +133,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // Relative session times must age while the sidebar stays open; one shared
   // minute clock avoids a timer per session row.
   const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
-  // Client-side workspace/session filtering (Workspaces header controls).
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
   const [runningOnly, setRunningOnly] = useState(false);
-  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Once the SSE stream has delivered a frame it is the source of truth for
   // running state; late /api/sessions responses must not overwrite it.
@@ -162,12 +160,16 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       const headers: Record<string, string> = {};
       if (sessionsEtagRef.current) headers["If-None-Match"] = sessionsEtagRef.current;
       const res = await fetch("/api/sessions", { headers, signal: controller.signal });
-      if (res.status === 304) return;
+      if (res.status === 304) {
+        setDiscoveryRefreshKey(value => value + 1);
+        return;
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const etag = res.headers.get("ETag");
       if (etag) sessionsEtagRef.current = etag;
       const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; runningSessions?: Array<{ id: string; cwd: string }> };
       setAllSessions(data.sessions);
+      setDiscoveryRefreshKey(value => value + 1);
       if (data.runningSessions) {
         for (const rs of data.runningSessions) {
           if (rs.id && rs.cwd) knownRunningCwdsRef.current.set(rs.id, rs.cwd);
@@ -639,15 +641,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   useEffect(() => {
     if (selectedSessionId && activeWorkspaceId) expandProject(activeWorkspaceId);
   }, [selectedSessionId, activeWorkspaceId, expandProject]);
-  const deferredSearchQuery = useDeferredValue(searchQuery);
-  const visibleWorkspaceEntries = useMemo(() => {
-    const query = deferredSearchQuery.trim().toLowerCase();
-    return workspaceEntries.map(entry => {
-      const nameMatches = entry.workspace.name.toLowerCase().includes(query);
-      return { ...entry, sessions: entry.sessions.filter(session => (!runningOnly || runningSessionIds.has(session.id))
-        && (!query || nameMatches || `${session.name ?? ""} ${session.firstMessage} ${session.id}`.toLowerCase().includes(query))) };
-    }).filter(entry => (!query && !runningOnly) || entry.sessions.length > 0 || (!runningOnly && entry.workspace.name.toLowerCase().includes(query)));
-  }, [workspaceEntries, deferredSearchQuery, runningOnly, runningSessionIds]);
+  const visibleWorkspaceEntries = useMemo(() => runningOnly
+    ? workspaceEntries.map(entry => ({ ...entry, sessions: entry.sessions.filter(session => runningSessionIds.has(session.id)) })).filter(entry => entry.sessions.length > 0)
+    : workspaceEntries, [workspaceEntries, runningOnly, runningSessionIds]);
   const treesByWorkspace = useMemo(() => new Map(visibleWorkspaceEntries.map(({ workspace, sessions }) => [workspace.id, buildSessionTree(sessions)])), [visibleWorkspaceEntries]);
   const nativeParentIds = useMemo(() => new Set(visibleSessions.flatMap(session => session.parentSessionId ? [session.parentSessionId] : [])), [visibleSessions]);
 
@@ -1095,8 +1091,20 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         </button>
       </div>
 
-      {/* Workspaces section header: label + search / filter / add */}
-      <div style={{ flexShrink: 0, padding: "4px 10px 2px", display: "flex", alignItems: "center", gap: 2 }}>
+      <SessionDiscovery
+        workspaces={workspaces}
+        assignments={assignments}
+        selectedSessionId={selectedSessionId}
+        runningSessionIds={runningSessionIds}
+        unreadSessionIds={unreadSessionIds}
+        exitedSessions={exitedSessions}
+        runningOnly={runningOnly}
+        onRunningOnlyChange={() => setRunningOnly(value => !value)}
+        onSelectSession={handleSelectSessionFromList}
+        refreshKey={discoveryRefreshKey}
+      >
+      {/* Original workspace navigation follows the independently collapsible recents. */}
+      <div style={{ padding: "4px 0 2px", display: "flex", alignItems: "center", gap: 2 }}>
         <span
           style={{
             flex: 1,
@@ -1110,27 +1118,6 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           {t("projects.heading")}
         </span>
         <SidebarIconButton
-          label={t("sessionSidebar.search")}
-          title={t("sessionSidebar.searchTitle")}
-          active={searchOpen}
-          onClick={() => {
-            const nextOpen = !searchOpen;
-            setSearchOpen(nextOpen);
-            if (nextOpen) setTimeout(() => searchInputRef.current?.focus(), 0);
-            else setSearchQuery("");
-          }}
-        >
-          <Search size={15} strokeWidth={1.9} aria-hidden="true" />
-        </SidebarIconButton>
-        <SidebarIconButton
-          label={t("sessionSidebar.filterRunning")}
-          title={t("sessionSidebar.filterRunningTitle")}
-          active={runningOnly}
-          onClick={() => setRunningOnly((v) => !v)}
-        >
-          <SlidersHorizontal size={15} strokeWidth={1.9} aria-hidden="true" />
-        </SidebarIconButton>
-        <SidebarIconButton
           label={t("workspaces.create")}
           title={t("workspaces.create")}
           onClick={() => {
@@ -1141,49 +1128,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           <Plus size={15} strokeWidth={1.9} aria-hidden="true" />
         </SidebarIconButton>
       </div>
-      {searchOpen && (
-        <div style={{ padding: "0 10px 6px", flexShrink: 0 }}>
-          <input
-            className="sidebar-session-search"
-            ref={searchInputRef}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") {
-                e.preventDefault();
-                setSearchOpen(false);
-                setSearchQuery("");
-              }
-            }}
-            placeholder={t("sessionSidebar.searchPlaceholder")}
-            aria-label={t("sessionSidebar.search")}
-            style={{
-              width: "100%",
-              height: 27,
-              boxSizing: "border-box",
-              padding: "0 9px",
-              background: "var(--bg)",
-              border: "1px solid var(--border)",
-              borderRadius: "var(--radius-control)",
-              outline: "none",
-              color: "var(--text)",
-              fontSize: 12,
-            }}
-            onFocus={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; }}
-            onBlur={(e) => { e.currentTarget.style.borderColor = "var(--border)"; }}
-          />
-        </div>
-      )}
 
-      {/* Workspaces */}
-        <div
-          style={{
-            flex: "1 1 auto",
-            overflowY: "auto",
-            padding: "2px 10px 10px",
-            minHeight: 80,
-          }}
-        >
           {loading && (
             <div role="status" aria-live="polite" aria-label={t("sessionSidebar.loading")} style={{ display: "grid", gap: 10, padding: "10px 4px" }}>
               <div aria-hidden="true" className="skeleton" style={{ width: "78%", height: 18 }} />
@@ -1249,7 +1194,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
               onSessionDeleted={handleSessionDeleted}
             />
           ))}
-        </div>
+      </SessionDiscovery>
 
       {/* Provider usage bar — pinned above Settings */}
       {usageVisible && <ProviderUsageBar />}
