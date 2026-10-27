@@ -13,6 +13,7 @@ This file records OMPWeb Plus changes above its integrated upstream baseline and
 - Preserve explicit main/linked Git checkout selection separately from logical membership, and retain filesystem roots as valid execution directories.
 - Resolve logical workspace paths through the OS-native resolver so Windows short-name aliases and Git checkout identities agree.
 - Load and subscribe to newly scheduled conversations immediately, without requiring a page reload; keep normal in-flight chat promotion on its existing runtime.
+- Fix slash-command discovery in the new-chat scheduling editor by using OMP's native `get_available_commands` RPC rather than Pi's unsupported `get_commands`.
 - Collapse scheduled-job details into a compact status row; manage, edit, cancel, and dismiss terminal jobs without obscuring the conversation.
 - Use the normal composer for scheduled prompts, including slash discovery, model-specific reasoning/Fast/Slow choices, tool presets, advisor, attachments, and automatic text growth. Discovery does not create a conversation and has a bounded child-process lifetime.
 - Preserve newer draft edits during asynchronous submission and scheduled-job updates; block duplicate queue submissions while acceptance is pending and keep dropped attachments with the targeted composer.

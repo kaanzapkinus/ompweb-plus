@@ -25,7 +25,7 @@ export async function GET(request: Request) {
       (async () => {
         const ready = await process.waitReady(20_000);
         await process.negotiateProtocol(ready);
-        return process.sendCommand<{ commands?: RpcAvailableSlashCommand[] }>({ type: "get_commands" }, 20_000);
+        return process.sendCommand<{ commands?: RpcAvailableSlashCommand[] }>({ type: "get_available_commands" }, 20_000);
       })(),
       timeout.promise,
     ]);
