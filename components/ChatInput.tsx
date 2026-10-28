@@ -269,28 +269,32 @@ const COMPOSITION_END_ENTER_GRACE_MS = 100;
 // The history / slash / @ menus are absolutely positioned relative to the
 // composer input. On the empty-session page the composer sits inside an
 // `overflow-y-auto` wrapper, so the part of a menu that extends past that
-// wrapper's edge gets clipped. Before paint we measure the nearest clipping
-// ancestor and pick the side (above/below the input) with more room, then cap
-// the menu height so it never overflows that boundary.
+// wrapper's edge gets clipped. Before paint and after viewport/scroll changes,
+// intersect every clipping ancestor with the keyboard-visible viewport, pick
+// the side with more room, and cap the menu height to that boundary.
 const MENU_EDGE_PAD = 8;
 
 function getMenuBoundary(el: HTMLElement | null): { top: number; bottom: number } {
   if (typeof window === "undefined" || !el) return { top: 0, bottom: 0 };
+  const viewport = window.visualViewport;
+  let top = viewport?.offsetTop ?? 0;
+  let bottom = Math.min(window.innerHeight, top + (viewport?.height ?? window.innerHeight));
   let node: HTMLElement | null = el.parentElement;
   while (node && node !== document.body && node !== document.documentElement) {
     if (getComputedStyle(node).overflowY !== "visible") {
       const rect = node.getBoundingClientRect();
-      return { top: rect.top, bottom: rect.bottom };
+      top = Math.max(top, rect.top);
+      bottom = Math.min(bottom, rect.bottom);
     }
     node = node.parentElement;
   }
-  return { top: 0, bottom: window.innerHeight };
+  return { top, bottom };
 }
 
 type MenuPlacement = "up" | "down";
 
 /**
- * Resolves the anchor rect (the relative parent of the menu) and the nearest
+ * Resolves the anchor rect (the relative parent of the menu) and the visible
  * clipping boundary, then returns which side to open on and the max height
  * (CSS px) that fits. `vhFraction`/`capPx` reproduce the menu's existing
  * `min(<vhFraction>vh, <capPx>px)` default so the unconstrained case is
@@ -314,21 +318,35 @@ function useDropdownFlip(
     const menu = menuRef.current;
     const anchor = menu?.parentElement;
     if (!menu || !anchor) return;
-    const boundary = getMenuBoundary(menu);
-    const rect = anchor.getBoundingClientRect();
-    const vh = window.innerHeight;
-    const defaultPx = Math.min(vh * vhFraction, capPx);
-    // The menu bottom (up) / top (down) is anchored 8px off the input edge.
-    const upSpace = rect.top - 8 - boundary.top - MENU_EDGE_PAD;
-    const downSpace = boundary.bottom - (rect.bottom + 8) - MENU_EDGE_PAD;
+    const updatePlacement = () => {
+      const boundary = getMenuBoundary(menu);
+      const rect = anchor.getBoundingClientRect();
+      const vh = window.visualViewport?.height ?? window.innerHeight;
+      const defaultPx = Math.min(vh * vhFraction, capPx);
+      // The menu bottom (up) / top (down) is anchored 8px off the input edge.
+      const upSpace = rect.top - 8 - boundary.top - MENU_EDGE_PAD;
+      const downSpace = boundary.bottom - (rect.bottom + 8) - MENU_EDGE_PAD;
 
-    if (upSpace >= defaultPx || upSpace >= downSpace) {
-      setPlacement("up");
-      setMaxHeight(Math.max(0, Math.min(defaultPx, upSpace)));
-    } else {
-      setPlacement("down");
-      setMaxHeight(Math.max(0, Math.min(defaultPx, downSpace)));
-    }
+      if (upSpace >= defaultPx || upSpace >= downSpace) {
+        setPlacement("up");
+        setMaxHeight(Math.max(0, Math.min(defaultPx, upSpace)));
+      } else {
+        setPlacement("down");
+        setMaxHeight(Math.max(0, Math.min(defaultPx, downSpace)));
+      }
+    };
+    updatePlacement();
+    const viewport = window.visualViewport;
+    window.addEventListener("resize", updatePlacement);
+    document.addEventListener("scroll", updatePlacement, true);
+    viewport?.addEventListener("resize", updatePlacement);
+    viewport?.addEventListener("scroll", updatePlacement);
+    return () => {
+      window.removeEventListener("resize", updatePlacement);
+      document.removeEventListener("scroll", updatePlacement, true);
+      viewport?.removeEventListener("resize", updatePlacement);
+      viewport?.removeEventListener("scroll", updatePlacement);
+    };
   }, [open, menuRef, vhFraction, capPx]);
 
   return { placement, maxHeight };

@@ -8,6 +8,7 @@ This file records OMPWeb Plus changes above its integrated upstream baseline and
 
 ### Fixes & Improvements
 
+- Keep slash-command menus visible in new chats on phones: constrain them to the keyboard-visible viewport and every clipping ancestor, and recalculate placement after keyboard resizing and scrolling.
 - Add always-visible, server-side message search across chats and workspaces, with matching excerpts, pagination, and background refreshes that retain loaded result pages.
 - Show a collapsible recent-chat list above workspaces, ordered only by real message activity rather than file edits, names, or navigation.
 - Replace the topic-folder layer with selectable logical workspaces shared by the sidebar and new-chat picker. Preserve every existing conversation's native working directory and transcript; migrate legacy memberships without deleting chats.
