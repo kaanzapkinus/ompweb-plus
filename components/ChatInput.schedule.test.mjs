@@ -306,6 +306,12 @@ test("a pending original send cannot be queued again after streaming begins", as
 test("a file dropped on the controlled composer belongs to it, not its ancestor", async (t) => {
   const previousReader = globalThis.FileReader;
   globalThis.FileReader = window.FileReader;
+  const reads = [];
+  const readAsDataURL = window.FileReader.prototype.readAsDataURL;
+  t.mock.method(window.FileReader.prototype, "readAsDataURL", function (file) {
+    reads.push(new Promise((resolve) => this.addEventListener("loadend", resolve, { once: true })));
+    return readAsDataURL.call(this, file);
+  });
   t.mock.method(URL, "createObjectURL", () => "blob:schedule-drop");
   t.after(() => {
     if (previousReader === undefined) delete globalThis.FileReader;
@@ -315,6 +321,8 @@ test("a file dropped on the controlled composer belongs to it, not its ancestor"
   render(React.createElement("div", { onDrop: () => { ancestorDrops++; } }, React.createElement(Composer)));
   const dropped = new window.File([Uint8Array.from(Buffer.from(PNG, "base64"))], "schedule.png", { type: "image/png" });
   fireEvent.drop(screen.getByRole("textbox", { name: "Prompt" }), { dataTransfer: { files: [dropped], types: ["Files"] } });
+  // Wait for the complete native read lifecycle before the shared DOM closes.
+  await act(async () => { await Promise.all(reads); });
   await waitFor(() => assert.ok(screen.getByRole("button", { name: /remove image/i })));
   assert.equal(ancestorDrops, 0);
 });
