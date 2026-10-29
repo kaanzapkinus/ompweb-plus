@@ -289,18 +289,45 @@ test("schedule prompt commands use the shared slash palette and submit only afte
   assert.ok(sent[0].startsWith("Work toward this goal for the rest of the session:\n\nfinish tomorrow"));
 });
 
-test("a pending original send cannot be queued again after streaming begins", async () => {
+test("pending admission retains the disabled send action rather than offering queue or stop", async (t) => {
   let accept;
   let queued = 0;
+  let aborted = 0;
   const pending = new Promise(resolve => { accept = resolve; });
-  const props = { initial: { ...empty(), value: "Send only once" }, onSend: () => pending, onFollowUp: () => { queued++; } };
+  t.after(() => accept(false));
+  const props = { initial: { ...empty(), value: "Send only once" }, onSend: () => pending, onFollowUp: () => { queued++; }, onAbort: () => { aborted++; } };
   const view = render(React.createElement(Composer, props));
   fireEvent.click(screen.getByRole("button", { name: "Schedule", exact: true }));
   view.rerender(React.createElement(Composer, { ...props, isStreaming: true }));
-  fireEvent.click(screen.getByRole("button", { name: "Queue", exact: true }));
+  assert.ok(screen.queryByRole("button", { name: "Queue", exact: true }) === null, "pending admission is not a queued follow-up");
+  assert.ok(screen.queryByRole("button", { name: "Stop", exact: true }) === null, "a pending send is not an acknowledged run");
+  const sending = screen.getByRole("button", { name: "Schedule", exact: true });
+  assert.equal(sending.disabled, true);
+  fireEvent.click(sending);
   fireEvent.keyDown(screen.getByRole("textbox", { name: "Prompt" }), { key: "Enter", code: "Enter" });
   assert.equal(queued, 0);
+  assert.equal(aborted, 0);
   await act(async () => { accept(true); });
+  assert.equal(screen.getByRole("button", { name: "Stop", exact: true }).disabled, false);
+});
+
+test("a running shell command remains cancellable while its send awaits completion", async (t) => {
+  let finish;
+  let aborted = 0;
+  const pending = new Promise(resolve => { finish = resolve; });
+  t.after(() => finish(false));
+  const props = {
+    initial: { ...empty(), value: "!sleep 600" }, deferCommands: false, submitLabel: undefined,
+    onSend: () => pending, onAbort: () => { aborted++; }, onFollowUp() {},
+  };
+  const view = render(React.createElement(Composer, props));
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true }));
+  view.rerender(React.createElement(Composer, { ...props, isStreaming: true }));
+  const stop = screen.queryByRole("button", { name: "Stop", exact: true });
+  assert.ok(stop && !stop.disabled, "running shell work must remain cancellable before completion");
+  fireEvent.click(stop);
+  assert.equal(aborted, 1);
+  await act(async () => { finish(true); });
 });
 
 test("a file dropped on the controlled composer belongs to it, not its ancestor", async (t) => {

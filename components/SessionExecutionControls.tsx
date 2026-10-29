@@ -16,6 +16,11 @@ import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { toSlashCommandInfo } from "@/hooks/useAgentSession-stream";
 import type { RpcAvailableSlashCommand } from "@/lib/pi-types";
 
+// getRandomValues is available on LAN HTTP too; randomUUID requires HTTPS.
+function randomToken(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 const COPY = {
   en: {
     policy: "When the model limit is reached", fallback: "Allow fallback", wait: "Keep model, wait for quota",
@@ -395,7 +400,7 @@ export function SessionExecutionControls({ sessionId, newSessionCwd, newSessionW
       prompt: job.prompt, date, timingMode: "exact",
       thinkingLevel: job.thinkingLevel, toolPreset: job.toolPreset,
       fastMode: job.fastMode, slowMode: job.slowMode, advisorEnabled: job.advisorEnabled,
-      images: job.images, imageKeys: job.images?.map(() => crypto.randomUUID()),
+      images: job.images, imageKeys: job.images?.map(() => randomToken()),
     });
     setFormError(null);
   };
@@ -405,7 +410,7 @@ export function SessionExecutionControls({ sessionId, newSessionCwd, newSessionW
       || draft.images.some((image, index) => image.data !== formRef.current.images?.[index]?.data || image.mimeType !== formRef.current.images?.[index]?.mimeType);
     updateForm({
       prompt: draft.value, images: draft.images, files: draft.files,
-      ...(imagesChanged ? { imageKeys: draft.images.map(() => crypto.randomUUID()), missingImageCount: 0 } : {}),
+      ...(imagesChanged ? { imageKeys: draft.images.map(() => randomToken()), missingImageCount: 0 } : {}),
     });
   };
   const optionsFor = (draft: ScheduleDraft): ExecutionPromptOptions => ({
@@ -461,7 +466,7 @@ export function SessionExecutionControls({ sessionId, newSessionCwd, newSessionW
     if (!draft || draft.signature !== promptSignature) {
       if (!draftModel) { setFormError(copy.modelRequired); return false; }
       if (!Number.isFinite(runAt) || runAt <= Date.now()) { setFormError(timingMode === "quota" ? copy.invalidReset : timingMode === "exact" ? copy.invalidDate : copy.invalidDelay); return false; }
-      const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+      const requestId = randomToken();
       draft = { signature: promptSignature, body: { prompt: message, runAt, ...draftModel, ...optionsFor(current), requestId } };
       promptRequest.current = draft;
       updateForm({ request: draft });

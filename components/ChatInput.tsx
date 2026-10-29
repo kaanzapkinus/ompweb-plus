@@ -524,6 +524,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const emittedExternalDraftRef = useRef<ChatDraft | undefined>(undefined);
   const mountedRef = useRef(true);
   const submissionPendingRef = useRef(false);
+  const submissionIsShellRef = useRef(false);
   const [submissionPending, setSubmissionPending] = useState(false);
   externalDraftRef.current = externalDraft;
   onDraftChangeRef.current = onDraftChange;
@@ -1048,6 +1049,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const images = attachedImagesRef.current;
     const files = attachedFilesRef.current;
     submissionPendingRef.current = true;
+    // Shell sends await command completion, so Stop must remain available.
+    submissionIsShellRef.current = !deferCommands && msg.startsWith("!");
     setSubmissionPending(true);
     try {
       let prompt = msg;
@@ -1599,6 +1602,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const dictationCapturing = isRecording || isPaused || isReviewing;
   const primaryActionQueuesMessage =
     isStreaming
+    && !submissionPending
     && (Boolean(value.trim()) || attachedImages.length > 0 || attachedFiles.length > 0 || pendingFileCount > 0 || dictationCapturing)
     && Boolean(onFollowUp);
 
@@ -3741,7 +3745,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <ListChecks size={13} strokeWidth={2} aria-hidden="true" />
                 {t("chatInput.queue")}
               </button>
-            ) : isStreaming ? (
+            ) : isStreaming && (!submissionPending || submissionIsShellRef.current) ? (
               <button
                 type="button"
                 className="composer-primary-action"

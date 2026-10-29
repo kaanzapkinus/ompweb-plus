@@ -947,3 +947,50 @@ test("scheduled Slow availability follows its selected model rather than the bac
   await user.selectOptions(choice, JSON.stringify(["beta", "flex"]));
   assert.equal(within(dialog).getByRole("button", { name: "Slow", exact: true }).getAttribute("aria-pressed"), "false");
 });
+
+test("scheduled images and documents survive attachment and submission on plain HTTP", async (t) => {
+  const user = userEvent.setup();
+  const uuidDescriptor = Object.getOwnPropertyDescriptor(globalThis.crypto, "randomUUID");
+  const previousReader = globalThis.FileReader;
+  const previousFormData = globalThis.FormData;
+  Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true, value: undefined });
+  globalThis.FileReader = window.FileReader;
+  globalThis.FormData = window.FormData;
+  t.mock.method(URL, "createObjectURL", () => "blob:schedule-http-proof");
+  t.after(() => {
+    if (uuidDescriptor) Object.defineProperty(globalThis.crypto, "randomUUID", uuidDescriptor);
+    else delete globalThis.crypto.randomUUID;
+    if (previousReader === undefined) delete globalThis.FileReader;
+    else globalThis.FileReader = previousReader;
+    globalThis.FormData = previousFormData;
+  });
+  const { requests } = await mount({ composerProps: { cwd: "/workspace", onSend() {}, onAbort() {}, isStreaming: false } });
+  const scheduleFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes("?type=upload")) return Response.json({ uploaded: ["proof.txt"] });
+    return scheduleFetch(url, init);
+  };
+  const dialog = await openSchedule(user);
+  const input = dialog.querySelector('input[type="file"]');
+  const file = new window.File(["private document body"], "proof.txt", { type: "text/plain" });
+  fireEvent.change(input, { target: { files: [file] } });
+  await within(dialog).findByRole("button", { name: /Remove file/ });
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
+  const image = new window.File([png], "proof.png", { type: "image/png" });
+  const readAsDataURL = window.FileReader.prototype.readAsDataURL;
+  let readFinished;
+  t.mock.method(window.FileReader.prototype, "readAsDataURL", function (value) {
+    readFinished = new Promise(resolve => this.addEventListener("loadend", resolve, { once: true }));
+    return readAsDataURL.call(this, value);
+  });
+  fireEvent.change(input, { target: { files: [image] } });
+  await act(async () => { await readFinished; });
+  await within(dialog).findByRole("button", { name: /Remove image/ });
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Prompt" }), { target: { value: "Inspect both attachments" } });
+  await user.click(within(dialog).getByRole("button", { name: "Schedule", exact: true }));
+  await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Schedule prompt" }), null));
+  const saved = requests.find(request => request.method === "POST").body;
+  assert.equal(saved.images[0].data, png.toString("base64"));
+  assert.match(saved.prompt, /\/workspace\/proof\.txt/);
+  assert.doesNotMatch(saved.prompt, /private document body/);
+});

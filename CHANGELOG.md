@@ -8,6 +8,8 @@ This file records OMPWeb Plus changes above its integrated upstream baseline and
 
 ### Fixes & Improvements
 
+- Keep scheduled image attachments usable over plain LAN HTTP by generating attachment identities without the HTTPS-only `crypto.randomUUID` API; retain path-only document submission.
+- Keep ordinary prompt admission visibly submitting rather than temporarily presenting it as Queue or Stop; preserve cancellation while a submitted shell command is still running.
 - Keep slash-command menus visible in new chats on phones: constrain them to the keyboard-visible viewport and every clipping ancestor, and recalculate placement after keyboard resizing and scrolling.
 - Add always-visible, server-side message search across chats and workspaces, with matching excerpts, pagination, and background refreshes that retain loaded result pages.
 - Show a collapsible recent-chat list above workspaces, ordered only by real message activity rather than file edits, names, or navigation.
