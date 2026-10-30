@@ -5191,3 +5191,44 @@ html[data-compact="true"] .omp-suggestion-panel {
   .execution-dialog textarea { min-height: 56px; }
   .execution-timing-tabs { margin-bottom: 6px; }
 }
+
+.draft-persistence {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin: 4px 0 8px;
+  overflow-wrap: anywhere;
+}
+.draft-persistence-status, .draft-persistence-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.draft-persistence button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.draft-persistence button:hover { background: var(--bg-hover); }
+.draft-persistence button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.draft-persistence button:disabled { opacity: .5; cursor: default; }
+.draft-persistence p[role="alert"] { color: var(--status-error); }
+.draft-history { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 8px; max-height: min(320px, calc(var(--omp-vv-height, 100dvh) * .4)); overflow-y: auto; overscroll-behavior: contain; }
+.draft-history ol { list-style: none; padding: 0; margin: 8px 0; }
+.draft-history li { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 8px 0; }
+.draft-history li > div { min-width: 0; }
+.draft-history li p { margin: 4px 0; white-space: pre-wrap; }
+.draft-history time { font-variant-numeric: tabular-nums; }
+@media (max-width: 640px), (pointer: coarse) {
+  .draft-persistence button { min-height: 44px; }
+}

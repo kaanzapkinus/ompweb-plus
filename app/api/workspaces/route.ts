@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { assignSessionToWorkspace, createWorkspace, deleteWorkspace, loadWorkspacesRegistry, renameWorkspace, WorkspacesError } from "@/lib/workspaces";
+import { allowFileRoot } from "@/lib/file-access";
 
 export const dynamic = "force-dynamic";
 function errorResponse(error: unknown) {
@@ -8,8 +9,13 @@ function errorResponse(error: unknown) {
   console.error("[api/workspaces]", error);
   return NextResponse.json({ error: "Workspaces request failed" }, { status: 500 });
 }
+async function loadAuthorizedWorkspaces() {
+  const registry = await loadWorkspacesRegistry();
+  for (const workspace of registry.workspaces) allowFileRoot(workspace.cwd);
+  return registry;
+}
 export async function GET() {
-  try { return NextResponse.json(await loadWorkspacesRegistry(), { headers: { "Cache-Control": "no-store" } }); }
+  try { return NextResponse.json(await loadAuthorizedWorkspaces(), { headers: { "Cache-Control": "no-store" } }); }
   catch (error) { return errorResponse(error); }
 }
 export async function POST(req: Request) {
@@ -19,7 +25,7 @@ export async function POST(req: Request) {
       throw new WorkspacesError("Workspace name and cwd are required");
     }
     await createWorkspace(body.name, body.cwd);
-    return NextResponse.json(await loadWorkspacesRegistry());
+    return NextResponse.json(await loadAuthorizedWorkspaces());
   } catch (error) { return errorResponse(error); }
 }
 export async function PATCH(req: Request) {
@@ -30,6 +36,6 @@ export async function PATCH(req: Request) {
     else if (body.action === "delete") await deleteWorkspace(body.workspaceId);
     else if (body.action === "assign") await assignSessionToWorkspace(body.sessionId, body.workspaceId);
     else throw new WorkspacesError("Invalid action");
-    return NextResponse.json(await loadWorkspacesRegistry());
+    return NextResponse.json(await loadAuthorizedWorkspaces());
   } catch (error) { return errorResponse(error); }
 }

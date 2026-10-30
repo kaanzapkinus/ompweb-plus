@@ -11,6 +11,24 @@ const { SessionExecutionControls } = await jiti.import("./SessionExecutionContro
 const { ChatInput } = await jiti.import("./ChatInput.tsx");
 const { useGlobalKeyboardShortcuts } = await jiti.import("../hooks/useKeyboardShortcuts.ts");
 
+let fixtureSequence = 0;
+let fixtureSessionId = "";
+let draftRecords = new Map();
+const originalFetchDescriptor = Object.getOwnPropertyDescriptor(globalThis, "fetch");
+function draftResponse(url, init = {}) {
+  const parsed = new URL(url, "http://fixture.test");
+  if (parsed.pathname !== "/api/drafts") return null;
+  const body = init.body ? JSON.parse(init.body) : null;
+  const key = body?.key ?? parsed.searchParams.get("key");
+  const current = draftRecords.get(key) ?? { key, revision: 0, updatedAt: "2026-10-29T00:00:00Z", payload: null };
+  if (init.method === "PUT") {
+    if (body.baseRevision !== current.revision) return Response.json({ record: current }, { status: 409 });
+    const record = { ...current, revision: current.revision + 1, payload: body.payload };
+    draftRecords.set(key, record);
+    return Response.json({ record });
+  }
+  return Response.json({ record: current });
+}
 function ScheduleComposer(props) {
   const [scheduleOpen, setScheduleOpen] = React.useState(false);
   const [available, setAvailable] = React.useState(false);
@@ -20,12 +38,14 @@ function ScheduleComposer(props) {
   return React.createElement(React.Fragment, null,
     React.createElement(SessionExecutionControls, {
       ...props, scheduleOpen, onScheduleOpenChange: setScheduleOpen,
+      newSessionWorkspaceId: props.newSessionWorkspaceId ?? `fixture-${fixtureSequence}`,
       onScheduleAvailabilityChange: setAvailable,
       scheduleReturnFocus: () => returnFocus.current,
       policyContainer,
     }),
     React.createElement(ChatInput, {
       onSend() {}, onAbort() {}, isStreaming: props.streaming ?? false,
+      draftKey: `normal-fixture-${fixtureSequence}`,
       onSchedulePrompt: (trigger) => { returnFocus.current = trigger; setScheduleOpen(true); },
       scheduleDisabled: !available,
       onExecutionPolicyContainerChange: setPolicyContainer,
@@ -34,7 +54,7 @@ function ScheduleComposer(props) {
 }
 const previousFetch = globalThis.fetch;
 const previousScrollIntoView = window.HTMLElement.prototype.scrollIntoView;
-const endpoint = "/api/sessions/chat-1/execution";
+let endpoint = "";
 const currentModel = Object.freeze({ provider: "alpha", modelId: "shared:model" });
 const models = [
   { provider: "alpha", id: "shared:model", name: "Shared model" },
@@ -43,6 +63,18 @@ const models = [
 ];
 
 beforeEach(() => {
+  fixtureSessionId = `fixture-chat-${++fixtureSequence}`;
+  endpoint = `/api/sessions/${fixtureSessionId}/execution`;
+  draftRecords = new Map();
+  let handler = previousFetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    get: () => {
+      const current = handler;
+      return (url, init) => draftResponse(url, init) ?? current(url, init);
+    },
+    set: value => { handler = value; },
+  });
   window.localStorage.clear();
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   window.HTMLElement.prototype.scrollIntoView = () => {};
@@ -55,7 +87,7 @@ async function cleanupComposer() {
 
 afterEach(async () => {
   await cleanupComposer();
-  globalThis.fetch = previousFetch;
+  Object.defineProperty(globalThis, "fetch", originalFetchDescriptor);
   if (previousScrollIntoView) window.HTMLElement.prototype.scrollIntoView = previousScrollIntoView;
   else delete window.HTMLElement.prototype.scrollIntoView;
   delete window.matchMedia;
@@ -78,7 +110,7 @@ async function mount({ jobs = [], usage = { generatedAt: null, reports: [] }, us
     if (response) snapshot = response;
     return Response.json(snapshot);
   };
-  const props = { sessionId: "chat-1", currentModel, models, ...overrides };
+  const props = { sessionId: fixtureSessionId, currentModel, models, ...overrides };
   let view;
   await act(async () => { view = render(React.createElement(ScheduleComposer, props)); });
   await waitFor(() => assert.equal(screen.getByRole("button", { name: "More actions" }).disabled, false));
@@ -993,4 +1025,22 @@ test("scheduled images and documents survive attachment and submission on plain 
   assert.equal(saved.images[0].data, png.toString("base64"));
   assert.match(saved.prompt, /\/workspace\/proof\.txt/);
   assert.doesNotMatch(saved.prompt, /private document body/);
+});
+
+test("a partly hydrated schedule cannot submit until every saved photo is available", async () => {
+  const key = `omp-web:schedule-draft:${JSON.stringify(["session", fixtureSessionId])}`;
+  const payload = {
+    prompt: "Keep all saved photos", model: currentModel, timingMode: "relative",
+    resetKey: "", delayHours: "1", delayMinutes: "0", date: "",
+    images: [{ data: "aGk=", mimeType: "image/png" }], imageKeys: ["newly-added"],
+    missingImageCount: 1, request: null,
+  };
+  draftRecords.set(key, { key, revision: 1, payload, updatedAt: "2026-10-29T00:00:00Z" });
+  const user = userEvent.setup();
+  const { requests } = await mount();
+  const dialog = await openSchedule(user);
+  await waitFor(() => assert.equal(within(dialog).getByRole("textbox", { name: "Prompt" }).value, "Keep all saved photos"));
+  await act(async () => { fireEvent.submit(dialog.querySelector("form")); });
+  assert.equal(requests.filter(request => request.method === "POST").length, 0, "a new photo cannot hide a saved photo that has not hydrated");
+  assert.equal(within(dialog).getByRole("button", { name: "Schedule", exact: true }).disabled, true);
 });

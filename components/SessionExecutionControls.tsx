@@ -8,8 +8,10 @@ import type { ExecutionJob, ExecutionModel, ExecutionPromptOptions, ExecutionSna
 import { Dialog, DialogContent, DialogTitle } from "./ui/primitives";
 import { useProviderUsage } from "./AppShell-provider-usage";
 import type { SessionInfo } from "@/lib/types";
-import { clearScheduleDraft, emptyScheduleDraft, readScheduleDraft, scheduleDraftKey, schedulePromptSignature, writeScheduleDraft, type ScheduleDraft } from "@/lib/schedule-draft";
+import { clearScheduleDraft, emptyScheduleDraft, readScheduleDraft, scheduleDraftKey, schedulePromptSignature, subscribeScheduleDraft, writeScheduleDraft, type ScheduleDraft } from "@/lib/schedule-draft";
+import { DraftPersistence } from "./DraftPersistence";
 import { ChatInput, type ChatInputProps } from "./ChatInput";
+import { hasPendingDraftImages } from "@/lib/durable-draft-client";
 import type { ChatDraft } from "@/lib/draft-store";
 import { composeMessageWithFileAttachments } from "@/lib/chat-attachments";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
@@ -44,7 +46,6 @@ const COPY = {
     retry: "Refresh", waitHint: "Quota waiting is enabled for this conversation only.", resumeTitle: "Set resume time",
     edit: "Edit", editTitle: "Edit scheduled prompt", saveChanges: "Save changes", dismiss: "Dismiss",
     manage: "Manage schedules", history: "History", add: "New scheduled prompt", stop: "Stop",
-    attachmentsMissing: "Image drafts are kept in memory only. Reattach the images before scheduling. An already accepted request will be recovered without sending again.",
     recovering: "Checking the saved request…", noSavedRequest: "No accepted schedule was found. Check recent conversations before creating a new request, then reattach your images.",
     noJobs: "No active schedules.", localStart: "Local start",
   },
@@ -81,7 +82,7 @@ function formatDelay(totalMinutes: number): string {
 }
 
 export function SessionExecutionControls({ sessionId, newSessionCwd, newSessionWorkspaceId, onSessionCreated, currentModel, models = EMPTY_MODELS, modelsLoading = false, composerProps, thinkingLevelsByModel, thinkingMapsByModel, onStop, scheduleOpen, onScheduleOpenChange, onScheduleAvailabilityChange, scheduleReturnFocus, policyContainer }: SessionExecutionControlsProps) {
-  const { locale } = useI18n();
+  const { locale, t } = useI18n();
   const copy = COPY.en;
   const [snapshot, setSnapshot] = useState<ExecutionSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -104,6 +105,7 @@ export function SessionExecutionControls({ sessionId, newSessionCwd, newSessionW
   const [commandsLoading, setCommandsLoading] = useState(false);
   const open = scheduleOpen || manualJob !== null || editingJob !== null;
   const draftKey = scheduleDraftKey(sessionId, newSessionCwd, newSessionWorkspaceId);
+  const pendingDraftImages = !manualJob && !editingJob && Boolean(draftKey && hasPendingDraftImages(draftKey));
   const currentModelRef = useRef(currentModel);
   currentModelRef.current = currentModel;
   const composerPropsRef = useRef(composerProps);
@@ -293,6 +295,16 @@ export function SessionExecutionControls({ sessionId, newSessionCwd, newSessionW
   }, [draftKey, invalidateRefresh, newDraft]);
 
   useEffect(() => {
+    if (!open || manualJob || editingJob || !draftKey) return;
+    return subscribeScheduleDraft(draftKey, () => {
+      const value = readScheduleDraft(draftKey) ?? newDraft();
+      savedDraft.current = { key: draftKey, value, touched: true };
+      promptRequest.current = value.request;
+      replaceForm(value);
+    });
+  }, [open, manualJob, editingJob, draftKey, newDraft, replaceForm]);
+
+  useEffect(() => {
     if (!sessionId) return;
     void refresh();
     const onVisible = () => { if (document.visibilityState === "visible") void refresh(); };
@@ -445,7 +457,7 @@ export function SessionExecutionControls({ sessionId, newSessionCwd, newSessionW
       if (expansion.kind === "usage-error") { setFormError(`/${expansion.command.replace(/^\//, "")} requires an argument.`); return false; }
       message = composeMessageWithFileAttachments(expansion.kind === "expand" ? expansion.prompt : current.prompt.trim(), current.files ?? []);
     }
-    if ((current.missingImageCount ?? 0) > 0 && !current.images?.length && !retryPrompt) { setFormError(copy.attachmentsMissing); return false; }
+    if (!retryPrompt && ((current.missingImageCount ?? 0) > 0 || (!editingJob && draftKey && hasPendingDraftImages(draftKey)))) { setFormError(t("durableDraft.photosLoading")); return false; }
     if (!retryPrompt) {
       if (!message.trim() && !current.images?.length) { setFormError(copy.required); return false; }
       if (!draftModel) { setFormError(copy.modelRequired); return false; }
@@ -627,7 +639,8 @@ export function SessionExecutionControls({ sessionId, newSessionCwd, newSessionW
             <p className="execution-hint">{copy.note}</p>
             {formError && <p role="alert" className="execution-error">{formError}</p>}
             {!manualJob && <>
-              {(form.missingImageCount ?? 0) > 0 && !form.images?.length && <p role="status" className="execution-hint">{copy.attachmentsMissing}</p>}
+              {!editingJob && draftKey && <DraftPersistence draftKey={draftKey} />}
+              {((form.missingImageCount ?? 0) > 0 || pendingDraftImages) && <p role="status" className="execution-hint">{t("durableDraft.photosLoading")}</p>}
               {retryPrompt && (form.request?.imageCount ?? 0) > 0 && !retryPrompt.images?.length && <button type="button" disabled={busy} onClick={() => void submit()}>{copy.recovering}</button>}
               <ChatInput
                 {...composerProps}
@@ -687,7 +700,7 @@ export function SessionExecutionControls({ sessionId, newSessionCwd, newSessionW
                 retryInfo={undefined}
                 usageLimit={undefined}
                 submitLabel={busy ? copy.saving : editingJob ? copy.saveChanges : copy.save}
-                submitDisabled={busy || (!retryPrompt && ((timingMode === "quota" && (!selectedReset || usage.loading || Boolean(usage.error))) || !draftModelAvailable || Boolean((form.missingImageCount ?? 0) > 0 && !form.images?.length)))}
+                submitDisabled={busy || (!retryPrompt && ((timingMode === "quota" && (!selectedReset || usage.loading || Boolean(usage.error))) || !draftModelAvailable || (form.missingImageCount ?? 0) > 0 || pendingDraftImages))}
               />
             </>}
             </div>

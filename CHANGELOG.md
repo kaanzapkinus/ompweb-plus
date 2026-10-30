@@ -8,6 +8,11 @@ This file records OMPWeb Plus changes above its integrated upstream baseline and
 
 ### Fixes & Improvements
 
+- Autosave normal and scheduled drafts to private server storage before sending, including unsent photos, saved document paths, and schedule settings; recover them across authorized devices.
+- Add retained draft checkpoints, explicit restore and cleanup, revision-guarded conflict choices, and independent offline edit queues. Accepted sends clear only their submitted active snapshot, including after new-chat promotion or composer unmount, not history or newer edits.
+- Store unchanged draft photos once in server and device caches; use references for subsequent autosaves and compact save receipts. Wait for retained photos to hydrate before sending or queueing cached text.
+- Restore document access for registered workspaces before their first chat and after server restart, without expanding access to unrelated directories.
+- Recover draft persistence after an interrupted lock release without taking ownership from a live writer.
 - Keep scheduled image attachments usable over plain LAN HTTP by generating attachment identities without the HTTPS-only `crypto.randomUUID` API; retain path-only document submission.
 - Keep ordinary prompt admission visibly submitting rather than temporarily presenting it as Queue or Stop; preserve cancellation while a submitted shell command is still running.
 - Keep slash-command menus visible in new chats on phones: constrain them to the keyboard-visible viewport and every clipping ancestor, and recalculate placement after keyboard resizing and scrolling.
@@ -22,7 +27,7 @@ This file records OMPWeb Plus changes above its integrated upstream baseline and
 - Collapse scheduled-job details into a compact status row; manage, edit, cancel, and dismiss terminal jobs without obscuring the conversation.
 - Use the normal composer for scheduled prompts, including slash discovery, model-specific reasoning/Fast/Slow choices, tool presets, advisor, attachments, and automatic text growth. Discovery does not create a conversation and has a bounded child-process lifetime.
 - Preserve newer draft edits during asynchronous submission and scheduled-job updates; block duplicate queue submissions while acceptance is pending and keep dropped attachments with the targeted composer.
-- Keep scheduled image payloads out of background polling and browser-local storage; preserve original request identities and explicitly recover or reject ambiguous image retries rather than silently losing attachments.
+- Keep scheduled image payloads out of background job polling and synchronous browser-local text storage; retain them in private draft storage and the device photo cache, preserve original request identities, and explicitly recover or reject ambiguous retries rather than silently dropping attachments.
 - Retain uncertain prompt-acknowledgement outcomes and terminal receipts; preserve execution ownership through advisor-driven session reconciliation and support native cancellation for scheduled side questions.
 
 ## OMPWeb Plus 0.5.2-plus.1

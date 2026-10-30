@@ -9,7 +9,7 @@ import { createJiti } from "jiti";
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { ChatInput } = await jiti.import("./ChatInput.tsx");
 const { useSidebarHistory } = await jiti.import("@/hooks/useSidebarHistory");
-const { clearDraft, getDraft } = await jiti.import("@/lib/draft-store");
+const { clearDraft, getDraft, setDraft } = await jiti.import("@/lib/draft-store");
 const previousFetch = globalThis.fetch;
 
 beforeEach(() => {
@@ -92,6 +92,37 @@ test("attachment-only drafts stay protected across live draft-key changes and re
   assert.ok(sent[0].includes("/workspace/notes.txt"));
   assert.ok(!sent[0].includes("important attachment"));
   assert.equal(warnsOnExit(), false);
+});
+
+for (const outcome of ["accepted", "refused", "newer old-scope edit"]) {
+  test(`new-chat promotion preserves draft ownership after ${outcome}`, async () => {
+    let settle;
+    const pending = new Promise(resolve => { settle = resolve; });
+    const chat = draftKey => React.createElement(ChatInput, {
+      draftKey, onSend: () => pending, onAbort() {}, isStreaming: false,
+    });
+    const view = render(chat("draft-a"));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Submitted workspace prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send", exact: true }));
+    view.rerender(chat("draft-b"));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Unsent new conversation text" } });
+    if (outcome === "newer old-scope edit") setDraft("draft-a", { value: "Newer workspace edit", images: [], files: [] });
+    await act(async () => { settle(outcome !== "refused"); });
+    assert.equal(getDraft("draft-a")?.value ?? null, outcome === "accepted" ? null : outcome === "refused" ? "Submitted workspace prompt" : "Newer workspace edit");
+    assert.equal(getDraft("draft-b")?.value, "Unsent new conversation text");
+    assert.equal(screen.getByRole("textbox").value, "Unsent new conversation text");
+  });
+}
+
+test("accepted sending clears the submitted draft after its composer unmounts", async () => {
+  let settle;
+  const pending = new Promise(resolve => { settle = resolve; });
+  const view = render(React.createElement(ChatInput, { draftKey: "draft-a", onSend: () => pending, onAbort() {}, isStreaming: false }));
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Accepted before closure" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true }));
+  view.unmount();
+  await act(async () => { settle(true); });
+  assert.equal(getDraft("draft-a"), null);
 });
 
 test("typed text autosaves immediately and stays isolated through chat switches, remounts and send", () => {

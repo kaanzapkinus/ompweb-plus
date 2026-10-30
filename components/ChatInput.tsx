@@ -15,7 +15,9 @@ import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
-import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftChanges, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { DraftPersistence } from "./DraftPersistence";
+import { hasPendingDraftImages } from "@/lib/durable-draft-client";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedFile } from "./ChatInput-draft-attachments";
 import {
@@ -938,6 +940,37 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setAttachedFiles(draftFilesToAttachedFiles(draft?.files));
   }, [draftKey, externalDraft, invalidateAttachments, setValue, setAttachedImages, setAttachedFiles]);
 
+  useEffect(() => {
+    if (externalDraft !== undefined || !draftKey) return;
+    return subscribeDraftChanges(draftKey, () => {
+      if (draftKeyRef.current !== draftKey) return;
+      const draft = getDraft(draftKey);
+      const images = draft?.images ?? [];
+      const files = draft?.files ?? [];
+      const nextValue = draft?.value ?? "";
+      if (nextValue === valueRef.current
+        && images.length === attachedImagesRef.current.length
+        && images.every((image, index) => image.data === attachedImagesRef.current[index].data && image.mimeType === attachedImagesRef.current[index].mimeType)
+        && files.length === attachedFilesRef.current.length
+        && files.every((file, index) => {
+          const current = attachedFilesRef.current[index];
+          return file.path === current.path && file.name === current.name && file.size === current.size && file.mimeType === current.mimeType;
+        })) return;
+      draftRevisionRef.current += 1;
+      invalidateAttachments();
+      attachedImagesRef.current.forEach(revokeImagePreview);
+      valueRef.current = nextValue;
+      attachedImagesRef.current = draftImagesToAttachedImages(images);
+      attachedFilesRef.current = draftFilesToAttachedFiles(files);
+      setValueState(nextValue);
+      setAttachedImagesState(attachedImagesRef.current);
+      setAttachedFilesState(attachedFilesRef.current);
+      setAtQuery(null);
+      setSlashMatch(null);
+      setHistoryMenuOpen(false);
+    });
+  }, [draftKey, externalDraft, invalidateAttachments]);
+
   useLayoutEffect(() => subscribeDraftRecovery((key, recovery) => {
     if (externalDraftRef.current !== undefined || draftKeyRef.current !== key) return;
     const { text } = recovery;
@@ -1034,6 +1067,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const handleSend = useCallback(async (overrideText?: string) => {
     if (submitDisabled || submissionPendingRef.current) return;
+    if (externalDraftRef.current === undefined && draftKeyRef.current && hasPendingDraftImages(draftKeyRef.current)) {
+      setAttachError(t("durableDraft.photosLoading"));
+      return;
+    }
     if (pendingFileCountRef.current > 0 || pendingImageCountRef.current > 0) {
       setAttachError("Wait for attachments to finish before sending.");
       return;
@@ -1048,6 +1085,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const key = draftKeyRef.current;
     const images = attachedImagesRef.current;
     const files = attachedFilesRef.current;
+    const submittedDraft: ChatDraft | null = externalDraftRef.current === undefined
+      ? { value: valueRef.current, images: images.map(imageToDraftImage), files: files.map(fileToDraftFile) }
+      : null;
     submissionPendingRef.current = true;
     // Shell sends await command completion, so Stop must remain available.
     submissionIsShellRef.current = !deferCommands && msg.startsWith("!");
@@ -1077,8 +1117,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       // Keep void callbacks synchronous; asynchronous consumers explicitly
       // acknowledge acceptance without sacrificing the draft in the meantime.
       const accepted = typeof result === "object" && result !== null ? await result : result;
-      if (accepted !== false && mountedRef.current && draftKeyRef.current === key
-        && draftRevisionRef.current === revision) clearInput();
+      if (accepted !== false) {
+        // New-chat admission can promote the composer to its native session
+        // before resolving. Clear only the original, still-matching snapshot.
+        if (key && submittedDraft) clearDraft(key, submittedDraft);
+        if (mountedRef.current && draftKeyRef.current === key && draftRevisionRef.current === revision) clearInput();
+      }
     } catch (error) {
       if (mountedRef.current && draftKeyRef.current === key) {
         setAttachError(error instanceof Error ? error.message : String(error));
@@ -1528,8 +1572,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const sendQueued = useCallback((mode: "steer" | "followup", overrideText?: string) => {
     if (submissionPendingRef.current || submitDisabled) return;
-    if (pendingFileCountRef.current > 0) {
-      setAttachError("Wait for file uploads to finish before sending or queueing.");
+    if (externalDraftRef.current === undefined && draftKeyRef.current && hasPendingDraftImages(draftKeyRef.current)) {
+      setAttachError(t("durableDraft.photosLoading"));
+      return;
+    }
+    if (pendingFileCountRef.current > 0 || pendingImageCountRef.current > 0) {
+      setAttachError("Wait for attachments to finish before sending or queueing.");
       return;
     }
     const raw = overrideText ?? value;
@@ -1605,6 +1653,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     && !submissionPending
     && (Boolean(value.trim()) || attachedImages.length > 0 || attachedFiles.length > 0 || pendingFileCount > 0 || dictationCapturing)
     && Boolean(onFollowUp);
+  const waitingForDraftImages = externalDraft === undefined && Boolean(draftKey && hasPendingDraftImages(draftKey));
 
   // ── Queued follow-up bar ────────────────────────────────────────────────
   // Texts are mirrored locally; mutations wait for native acknowledgement.
@@ -2193,6 +2242,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       />
       <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
+        {externalDraft === undefined && draftKey && <DraftPersistence draftKey={draftKey} />}
         <ComposerModeStatus goal={activeGoal} plan={activePlan} />
         {/* Retry banner */}
         {retryInfo && (
@@ -3728,7 +3778,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     sendQueued("followup");
                   }
                 }}
-                disabled={submitDisabled || submissionPending || isTranscribing || pendingFileCount > 0}
+                disabled={submitDisabled || submissionPending || isTranscribing || pendingFileCount > 0 || waitingForDraftImages}
                 title={t("chatInput.queueMessage")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
@@ -3773,7 +3823,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 type="button"
                 className="composer-primary-action"
                 onClick={isRecording || isPaused || isReviewing ? () => stopAndFinishDictation("send") : () => void handleSend()}
-                disabled={submitDisabled || submissionPending || isTranscribing || pendingFileCount > 0 || !(isRecording || isPaused || isReviewing || value.trim() || attachedImages.length || attachedFiles.length)}
+                disabled={submitDisabled || submissionPending || isTranscribing || pendingFileCount > 0 || waitingForDraftImages || !(isRecording || isPaused || isReviewing || value.trim() || attachedImages.length || attachedFiles.length)}
                 title={submitLabel ?? (isRecording || isPaused || isReviewing ? t("chatInput.sendDictation") : t("chatInput.send"))}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,

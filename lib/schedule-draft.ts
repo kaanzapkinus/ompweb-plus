@@ -1,5 +1,6 @@
 import type { ExecutionModel, ExecutionPromptOptions } from "./session-execution-types";
 import type { ChatDraftFile, ChatDraftImage } from "./draft-store";
+import { draftTextCache, readRemoteDraft, saveRemoteDraft, sameDraftPayload, subscribeRemoteDraftChanges } from "./durable-draft-client";
 
 export type SchedulePromptRequest = ExecutionModel & ExecutionPromptOptions & { prompt: string; runAt: number; requestId: string };
 export type ScheduleDraft = ExecutionPromptOptions & {
@@ -16,7 +17,7 @@ export type ScheduleDraft = ExecutionPromptOptions & {
   request: { signature: string; body: SchedulePromptRequest; imageCount?: number } | null;
 };
 type StorageLike = Pick<Storage, "getItem" | "setItem" | "removeItem">;
-// Attachment bytes live only for the lifetime of this browser document.
+// Synchronous attachment access; IndexedDB/server persistence is shared by both adapters.
 const attachments = new WeakMap<StorageLike, Map<string, {
   serialized: string;
   images?: ChatDraftImage[];
@@ -24,18 +25,7 @@ const attachments = new WeakMap<StorageLike, Map<string, {
 }>>();
 
 function serializedDraft(draft: ScheduleDraft): string {
-  const { images, ...fields } = draft;
-  const request = draft.request;
-  const requestFields = request ? (({ images: _images, ...body }) => ({
-    ...request,
-    body,
-    imageCount: request.body.images?.length || request.imageCount || undefined,
-  }))(request.body) : null;
-  return JSON.stringify({
-    ...fields,
-    missingImageCount: images?.length || draft.missingImageCount || undefined,
-    request: requestFields,
-  });
+  return JSON.stringify(draftTextCache({ ...draft }));
 }
 
 function browserStorage(): StorageLike | null {
@@ -79,11 +69,8 @@ function expiredReset(key: string): boolean {
   } catch { return false; }
 }
 
-export function readScheduleDraft(key: string | null, storage = browserStorage()): ScheduleDraft | null {
-  if (!key || !storage) return null;
+function parseDraft(value: ScheduleDraft | null): ScheduleDraft | null {
   try {
-    const serialized = storage.getItem(key) ?? "null";
-    const value = JSON.parse(serialized) as ScheduleDraft | null;
     if (!value || typeof value !== "object" || typeof value.prompt !== "string" || (value.model !== null && !isModel(value.model))
       || !["quota", "relative", "exact"].includes(value.timingMode)
       || ![value.resetKey, value.delayHours, value.delayMinutes, value.date].every((field) => typeof field === "string")) return null;
@@ -102,31 +89,89 @@ export function readScheduleDraft(key: string | null, storage = browserStorage()
         request.signature = JSON.stringify(signature);
       }
     }
-    const memory = attachments.get(storage)?.get(key);
-    if (memory?.serialized === serialized) {
-      if (memory.images) value.images = memory.images;
-      if (request && memory.requestImages) request.body.images = memory.requestImages;
+    return value;
+  } catch { return null; }
+}
+
+function localScheduleDraft(key: string, storage: StorageLike | null): ScheduleDraft | null {
+  try {
+    const serialized = storage?.getItem(key) ?? "null";
+    const value = parseDraft(JSON.parse(serialized) as ScheduleDraft | null);
+    const memory = storage ? attachments.get(storage)?.get(key) : undefined;
+    if (value && memory?.serialized === serialized) {
+      if (memory.images) value.images = memory.images.map(image => ({ ...image }));
+      if (value.request && memory.requestImages) value.request.body.images = memory.requestImages.map(image => ({ ...image }));
     }
     return value;
   } catch { return null; }
 }
 
-export function writeScheduleDraft(key: string | null, draft: ScheduleDraft, storage = browserStorage()): void {
-  if (!key || !storage) return;
+export function readScheduleDraft(key: string | null, storage = browserStorage()): ScheduleDraft | null {
+  if (!key) return null;
+  if (typeof window !== "undefined" && storage === browserStorage()) {
+    const remote = readRemoteDraft(key);
+    if (remote) return parseDraft(remote.payload as ScheduleDraft | null);
+  }
+  return localScheduleDraft(key, storage);
+}
+
+export function subscribeScheduleDraft(key: string | null, listener: () => void): () => void {
+  if (!key) return () => {};
+  const storage = browserStorage();
+  if (!readRemoteDraft(key)) {
+    const legacy = localScheduleDraft(key, storage);
+    if (legacy) saveRemoteDraft(key, { ...legacy });
+  }
+  return subscribeRemoteDraftChanges(key, () => {
+    const draft = readScheduleDraft(key);
+    if (draft) writeLocalDraft(key, draft, storage);
+    else {
+      try { storage?.removeItem(key); } catch { /* The shared cache remains authoritative. */ }
+      if (storage) attachments.get(storage)?.delete(key);
+    }
+    listener();
+  });
+}
+
+function sameScheduleDraft(left: ScheduleDraft | null, right: ScheduleDraft): boolean {
+  return Boolean(left && serializedDraft(left) === serializedDraft(right)
+    && sameDraftPayload(left.images, right.images)
+    && sameDraftPayload(left.request?.body.images, right.request?.body.images));
+}
+
+function writeLocalDraft(key: string, draft: ScheduleDraft, storage: StorageLike | null): void {
+  if (!storage) return;
   const serialized = serializedDraft(draft);
   let memory = attachments.get(storage);
   if (!memory) attachments.set(storage, memory = new Map());
   memory.set(key, { serialized, images: draft.images, requestImages: draft.request?.body.images });
-  try { storage.setItem(key, serialized); } catch { /* Best effort when browser storage is unavailable or full. */ }
+  try { storage.setItem(key, serialized); } catch { /* The shared cache persists browser drafts independently. */ }
+}
+
+export function writeScheduleDraft(key: string | null, draft: ScheduleDraft, storage = browserStorage()): void {
+  if (!key) return;
+  const current = readScheduleDraft(key, storage);
+  if (sameScheduleDraft(current, draft)) return;
+  writeLocalDraft(key, draft, storage);
+  if (typeof window !== "undefined" && storage === browserStorage()) saveRemoteDraft(key, { ...draft });
 }
 
 export function clearScheduleDraft(key: string | null, submitted: ScheduleDraft, storage = browserStorage()): boolean {
-  if (!key || !storage) return true;
-  try {
-    const stored = storage.getItem(key);
-    if (stored !== null && stored !== serializedDraft(submitted)) return false;
-    storage.removeItem(key);
-    attachments.get(storage)?.delete(key);
-  } catch { /* The in-memory draft remains usable when storage is blocked. */ }
+  if (!key) return true;
+  const current = readScheduleDraft(key, storage);
+  const comparable = parseDraft({
+    ...submitted,
+    request: submitted.request ? { ...submitted.request, body: { ...submitted.request.body } } : null,
+  }) ?? submitted;
+  if (current && !sameScheduleDraft(current, comparable)) return false;
+  if (!current) {
+    try {
+      const stored = storage?.getItem(key);
+      if (stored != null && stored !== serializedDraft(submitted)) return false;
+    } catch { /* Preserve the existing best-effort clear when storage is denied. */ }
+  }
+  try { storage?.removeItem(key); } catch { /* The shared cache remains authoritative. */ }
+  if (storage) attachments.get(storage)?.delete(key);
+  if (current && typeof window !== "undefined" && storage === browserStorage()) saveRemoteDraft(key, null);
   return true;
 }

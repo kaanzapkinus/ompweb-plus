@@ -1,3 +1,5 @@
+import { readRemoteDraft, saveRemoteDraft, sameDraftPayload, subscribeRemoteDraftChanges } from "./durable-draft-client";
+
 export interface ChatDraftImage {
   data: string;
   mimeType: string;
@@ -136,6 +138,19 @@ function isEmptyDraft(draft: ChatDraft): boolean {
 }
 
 export function getDraft(key: string): ChatDraft | null {
+  const remote = readRemoteDraft(key);
+  if (remote) {
+    const payload = remote.payload;
+    if (payload && typeof payload.value === "string" && Array.isArray(payload.images) && Array.isArray(payload.files)) {
+      const draft: ChatDraft = { value: payload.value, images: toDraftImages(payload.images), files: payload.files as ChatDraftFile[] };
+      if (!isEmptyDraft(draft)) {
+        drafts.set(key, draft);
+        return cloneDraft(draft);
+      }
+    }
+    drafts.delete(key);
+    return null;
+  }
   const draft = drafts.get(key);
   if (draft) return cloneDraft(draft);
   // Another tab may have written to localStorage after this tab's module loaded
@@ -177,7 +192,26 @@ export function getDraftSummary(key: string): { text: string; hasAttachments: bo
   };
 }
 
+/** Hydration/restoration notifications; ordinary edits keep their existing path. */
+export function subscribeDraftChanges(key: string, listener: () => void): () => void {
+  const cached = readRemoteDraft(key);
+  const legacy = drafts.get(key);
+  if (!cached && legacy && !isEmptyDraft(legacy)) saveRemoteDraft(key, { ...cloneDraft(legacy) });
+  return subscribeRemoteDraftChanges(key, () => {
+    const draft = getDraft(key);
+    if (draft) drafts.set(key, cloneDraft(draft));
+    else drafts.delete(key);
+    if (draft?.value) {
+      try { localStorage.setItem(STORAGE_PREFIX + key, draft.value); } catch { /* The shared cache keeps the other durable copy. */ }
+    } else clearStoredText(key);
+    for (const callback of listeners) callback();
+    listener();
+  });
+}
+
 export function setDraft(key: string, draft: ChatDraft): void {
+  const current = getDraft(key);
+  if (sameDraftPayload(current, isEmptyDraft(draft) ? null : draft)) return;
   if (isEmptyDraft(draft)) {
     clearDraft(key);
     return;
@@ -187,7 +221,7 @@ export function setDraft(key: string, draft: ChatDraft): void {
   drafts.set(key, cloneDraft(draft));
   if (draft.value) {
     try {
-      // Persist text only; attachment payloads stay in this document's memory.
+      // Small synchronous fallback; full attachments are persisted by the client.
       localStorage.setItem(STORAGE_PREFIX + key, draft.value);
       sessionStorage.removeItem(STORAGE_PREFIX + key);
     } catch {
@@ -196,6 +230,7 @@ export function setDraft(key: string, draft: ChatDraft): void {
   } else {
     clearStoredText(key);
   }
+  saveRemoteDraft(key, { ...cloneDraft(draft) });
   for (const listener of listeners) listener();
 }
 
@@ -219,10 +254,14 @@ function clearStoredText(key: string): void {
   }
 }
 
-export function clearDraft(key: string): void {
+export function clearDraft(key: string, submitted?: ChatDraft): boolean {
+  const current = getDraft(key);
+  if (submitted && !sameDraftPayload(current, submitted)) return false;
   const deleted = drafts.delete(key);
   clearStoredText(key);
-  if (deleted) {
+  if (current) saveRemoteDraft(key, null);
+  if (deleted || current) {
     for (const listener of listeners) listener();
   }
+  return true;
 }

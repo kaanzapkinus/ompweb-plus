@@ -67,6 +67,7 @@ app/api/
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
   events/route.ts                 GET multiplexed SSE | POST subscribe/unsubscribe channels
+  drafts/route.ts                 GET active/checkpoint/history | PUT revision-guarded autosave | DELETE explicit draft cleanup
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
@@ -100,7 +101,11 @@ lib/
   provider-accounts.ts distinct omp accounts per provider from `omp usage` reports (Models → provider detail)
   agent-client.ts      typed fetch helper for /api/agent commands
   btw.ts               /btw side-question records + pure frame/snapshot merge (order-safe)
-  draft-store.ts       local draft persistence helpers
+  draft-store.ts       normal composer adapter and legacy text-cache migration
+  schedule-draft.ts    schedule draft adapter, settings, and request identity
+  durable-draft-client.ts  offline writer journals, image cache, and server CAS synchronization
+  durable-draft-types.ts   browser/server draft records, revisions, and payload contracts
+  durable-drafts.ts    private immutable checkpoints, image blobs, atomic heads, and explicit cleanup
   event-stream.ts      tab-side EventSource-shaped streams over the shared worker
   event-stream-hub.ts  server connections + running/session/file channels for /api/events
   event-stream-protocol.ts  wire contract shared by hub, route, and facade
