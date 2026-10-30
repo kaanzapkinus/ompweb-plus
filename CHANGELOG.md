@@ -12,7 +12,7 @@ This file records OMPWeb Plus changes above its integrated upstream baseline and
 - Add retained draft checkpoints, explicit restore and cleanup, revision-guarded conflict choices, and independent offline edit queues. Accepted sends clear only their submitted active snapshot, including after new-chat promotion or composer unmount, not history or newer edits.
 - Store unchanged draft photos once in server and device caches; use references for subsequent autosaves and compact save receipts. Wait for retained photos to hydrate before sending or queueing cached text.
 - Restore document access for registered workspaces before their first chat and after server restart, without expanding access to unrelated directories.
-- Recover draft persistence after an interrupted lock release without taking ownership from a live writer.
+- Recover draft persistence after an interrupted lock release without taking ownership from a live writer; handle Windows directory-lock contention with bounded retries even when the previous owner has just released it.
 - Keep scheduled image attachments usable over plain LAN HTTP by generating attachment identities without the HTTPS-only `crypto.randomUUID` API; retain path-only document submission.
 - Keep ordinary prompt admission visibly submitting rather than temporarily presenting it as Queue or Stop; preserve cancellation while a submitted shell command is still running.
 - Keep slash-command menus visible in new chats on phones: constrain them to the keyboard-visible viewport and every clipping ancestor, and recalculate placement after keyboard resizing and scrolling.

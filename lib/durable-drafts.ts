@@ -176,7 +176,13 @@ async function withDraftLock<T>(key: string, run: () => T): Promise<T> {
         }
       }
       try { renameSync(candidate, lock); acquired = true; }
-      catch (error) { if (!["EEXIST", "ENOTEMPTY", "ENOENT"].includes(code(error) ?? "")) throw error; }
+      catch (error) {
+        // Windows reports directory contention as EPERM. The owner can release
+        // before inspection; retry within the same deadline. Only a successful
+        // atomic rename grants ownership.
+        const windowsContention = process.platform === "win32" && code(error) === "EPERM";
+        if (!windowsContention && !["EEXIST", "ENOTEMPTY", "ENOENT"].includes(code(error) ?? "")) throw error;
+      }
       if (!acquired) {
         if (Date.now() >= deadline) throw busy();
         await delay(20);
